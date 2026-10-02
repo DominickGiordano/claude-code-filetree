@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Claude_Code-%E2%89%A5_2.1.287-D97757?logo=claude&logoColor=fff" alt="Claude Code 2.1.287 or newer">
-  <img src="https://img.shields.io/badge/version-0.2.6-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.2.7-blue" alt="Version">
   <img src="https://img.shields.io/badge/type-mod-6f42c1" alt="Claude Code mod">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
@@ -27,16 +27,18 @@
 The repo is its own plugin marketplace. Run this in the terminal:
 
 ```bash
-claude plugin marketplace add data-goblin/filetree
-claude plugin install filetree@filetree
+claude plugin marketplace add data-goblin/claude-code-filetree
+claude plugin install filetree@claude-code-filetree
 ```
 
 Or inside a Claude Code session:
 
 ```text
-/plugin marketplace add data-goblin/filetree
-/plugin install filetree@filetree
+/plugin marketplace add data-goblin/claude-code-filetree
+/plugin install filetree@claude-code-filetree
 ```
+
+Installed it as `filetree@filetree` before the repository was renamed? Nothing to do: that install keeps loading and keeps receiving updates.
 
 ## Features
 
