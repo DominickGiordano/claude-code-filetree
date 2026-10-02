@@ -77,6 +77,7 @@ function segments(command: string): string[][] {
 
 function stripGlobals(tokens: string[]): string[] {
   const out = [...tokens]
+  if (out[0] === 'env') out.shift()
   while (out.length && /^[A-Z_][A-Z0-9_]*=/.test(out[0] ?? '')) out.shift()
   return out
 }
@@ -96,8 +97,9 @@ export function gitActions(command: string): GitAction[] {
       if (READ_ONLY_GIT.has(verb)) continue
       if (verb === 'stash' && ['list', 'show'].includes(tokens[i + 1] ?? '')) continue
       if (verb === 'branch' && (tokens.length <= i + 1 || tokens.slice(i + 1).every(t => t.startsWith('-')))) continue
-      if (verb === 'tag' && tokens.length <= i + 1) continue
-      const spec = GIT_VERBS[verb]
+      const rest = tokens.slice(i + 1)
+      if (verb === 'tag' && (rest.length === 0 || rest.some(t => /^(-l|--list|-n\d*|--contains|--points-at|--merged|--no-merged|-v|--verify)$/.test(t)))) continue
+      const spec = verb === 'checkout' && rest.includes('--') ? GIT_VERBS.restore : GIT_VERBS[verb]
       if (spec) out.push({ kind: `git ${verb}`, ...spec })
     } else if (head === 'gh') {
       const pair = `${tokens[1] ?? ''} ${tokens[2] ?? ''}`
@@ -114,7 +116,7 @@ const READERS = new Set(['rg', 'grep', 'egrep', 'fgrep', 'find', 'fd', 'fdfind',
 const PATTERN_FIRST = new Set(['rg', 'grep', 'egrep', 'fgrep', 'sed', 'awk', 'jq'])
 const OUTPUT_PATHS = new Set(['rg', 'grep', 'egrep', 'fgrep', 'find', 'fd', 'fdfind'])
 
-function resolve(cwd: string, p: string): string {
+export function resolve(cwd: string, p: string): string {
   if (p.startsWith('/')) return p.replace(/\/+$/, '') || '/'
   const parts = cwd.split('/')
   for (const seg of p.split('/')) {

@@ -28,6 +28,7 @@ export function emptyTree(root: string): FileTree {
     ignored: [],
     untrackedDirs: [],
     top: '',
+    prefix: '',
     branch: null,
     counts: {},
     flash: [],
@@ -96,14 +97,19 @@ export type Change = 'new' | 'mod' | 'del'
 export function parseBranch(record: string): Branch {
   const body = record.replace(/^## /, '')
   if (body.startsWith('HEAD (no branch)')) return { head: 'detached', upstream: '', ahead: 0, behind: 0 }
-  const head = body.match(/^(?:No commits yet on |Initial commit on )?([^.\s[]+)/)?.[1] ?? body
+  const head = body.match(/^(?:No commits yet on |Initial commit on )?(.+?)(?:\.\.\.|\s|$)/)?.[1] ?? body
   const upstream = body.match(/\.\.\.(\S+)/)?.[1] ?? ''
   const ahead = Number(body.match(/ahead (\d+)/)?.[1] ?? 0)
   const behind = Number(body.match(/behind (\d+)/)?.[1] ?? 0)
   return { head, upstream, ahead, behind }
 }
 
-export function parseGit(stdout: string, top: string): GitStatus {
+export function mapper(root: string, prefix: string): (rel: string) => string | null {
+  return rel => (rel.startsWith(prefix) ? join(root, rel.slice(prefix.length).replace(/\/$/, '')).replace(/\/$/, '') : null)
+}
+
+export function parseGit(stdout: string, root: string, prefix: string): GitStatus {
+  const map = mapper(root, prefix)
   const git: Record<string, string> = {}
   const ignored: string[] = []
   const untrackedDirs: string[] = []
@@ -119,8 +125,9 @@ export function parseGit(stdout: string, top: string): GitStatus {
     if (rec.length < 4) continue
     const xy = rec.slice(0, 2)
     const raw = rec.slice(3)
-    const path = join(top, raw.replace(/\/$/, ''))
     if (xy[0] === 'R' || xy[0] === 'C') i++
+    const path = map(raw)
+    if (!path) continue
     if (xy === '!!') {
       ignored.push(path)
       continue
@@ -136,16 +143,17 @@ export function parseGit(stdout: string, top: string): GitStatus {
     if (!letter) continue
     git[path] = stronger(git[path], letter)
     let dir = dirname(path)
-    while (dir.length >= top.length && dir !== '/') {
+    while (dir.length >= root.length && dir !== '/') {
       git[dir] = stronger(git[dir], letter)
-      if (dir === top) break
+      if (dir === root) break
       dir = dirname(dir)
     }
   }
   return { git, ignored, untrackedDirs, branch, files }
 }
 
-export function parseNumstat(stdout: string, top: string, into: Record<string, [number, number]>): void {
+export function parseNumstat(stdout: string, root: string, prefix: string, into: Record<string, [number, number]>): void {
+  const map = mapper(root, prefix)
   const parts = stdout.split('\0')
   for (let i = 0; i < parts.length; i++) {
     const rec = parts[i] ?? ''
@@ -160,20 +168,21 @@ export function parseNumstat(stdout: string, top: string, into: Record<string, [
     if (!path) continue
     const add = m[1] === '-' ? 0 : Number(m[1])
     const del = m[2] === '-' ? 0 : Number(m[2])
-    const abs = join(top, path)
+    const abs = map(path)
+    if (!abs) continue
     const prev = into[abs] ?? [0, 0]
     into[abs] = [prev[0] + add, prev[1] + del]
   }
 }
 
-export function rollUp(diff: Record<string, [number, number]>, top: string): Record<string, [number, number]> {
+export function rollUp(diff: Record<string, [number, number]>, root: string): Record<string, [number, number]> {
   const out: Record<string, [number, number]> = { ...diff }
   for (const [path, [add, del]] of Object.entries(diff)) {
     let dir = dirname(path)
-    while (dir.length >= top.length && dir !== '/') {
+    while (dir.length >= root.length && dir !== '/') {
       const prev = out[dir] ?? [0, 0]
       out[dir] = [prev[0] + add, prev[1] + del]
-      if (dir === top) break
+      if (dir === root) break
       dir = dirname(dir)
     }
   }

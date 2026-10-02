@@ -40,6 +40,7 @@ export type FileTree = {
   ignored: string[]
   untrackedDirs: string[]
   top: string
+  prefix: string
   branch: Branch | null
   counts: Record<string, [number, number, number]>
   flash: string[]
@@ -61,8 +62,6 @@ declare module 'claude-code' {
     filetree: {
       tree: FileTree
       theme: Theme
-      phase: number
-      busy: number
       activity: Activity[]
     }
   }

@@ -1,7 +1,7 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Activity, FileNode, FileTree, Theme } from '../types'
-import { BRANCH_ICON, type GitAction, gitActions, readTargets, TONES } from './git'
+import { BRANCH_ICON, type GitAction, gitActions, readTargets, resolve, TONES } from './git'
 import type { RowSpec, RowsProps, Seg } from './rows'
 import { CHEVRON_CLOSED, CHEVRON_OPEN, fileIcon, GIT_COLOR } from './icons'
 import {
@@ -10,6 +10,7 @@ import {
   dirname,
   emptyTree,
   join,
+  mapper,
   parseGit,
   parseNumstat,
   parseTheme,
@@ -24,13 +25,13 @@ import {
 
 const TREE = { plugin: 'filetree', key: 'tree' } as const
 const THEME = { plugin: 'filetree', key: 'theme' } as const
-const PHASE = { plugin: 'filetree', key: 'phase' } as const
 const ACTIVITY = { plugin: 'filetree', key: 'activity' } as const
-const BUSY = { plugin: 'filetree', key: 'busy' } as const
 const PANE = 'filetree'
+const SHIMMER = Object.fromEntries(Object.entries(TONES).map(([k, v]) => [k, { bright: v.bright, dim: v.dim }]))
 const BRANCH_ROW = '#branch'
-const FLASH_TICKS = 30
-const FLASH_MS = 90
+const FLASH_MS = 2700
+const RUNNING_MAX_MS = 600_000
+const IGNORED_PRUNE_LIMIT = 40
 const DOUBLE_MS = 450
 const FIND_LIMIT = 200
 const READ_REVEAL_LIMIT = 12
@@ -42,27 +43,23 @@ const THEME_FILE = '.local/state/omarchy/current/theme/colors.toml'
 const PRUNE = ['.git', 'node_modules', 'target', '.venv', '__pycache__', 'dist', '.next']
 
 let blink: Timer | null = null
-let busyTimer: Timer | null = null
 let generation = 0
 let lastPress = { key: '', at: 0 }
 let plain = false
 let follow = true
 let scanning: Promise<void> | null = null
-let scanAgain = false
+let scanJobs: Job[] = []
 let gitRun: Promise<void> | null = null
-let gitAgain = false
+let gitNext: Promise<void> | null = null
 let queuedReads: string[] = []
 let showReads = true
 let showWrites = true
-let searchIndex: { root: string; paths: string[] } | null = null
+let searchIndex: { root: string; paths: Promise<string[]> } | null = null
 let activityId = 0
 
-function shimmerColor(i: number, phase: number, len: number, dim: boolean, tone: string): string {
-  const band = ((phase * 1.6) % (len + 8)) - 4
-  const d = Math.abs(i - band)
-  const set = TONES[tone] ?? TONES.orange
-  const palette = (dim ? set?.dim : set?.bright) ?? ['#f97316']
-  return palette[d < 0.8 ? 3 : d < 1.8 ? 2 : d < 2.8 ? 1 : 0] ?? palette[0] ?? '#f97316'
+function clean(segs: Seg[]): Seg[] {
+  for (const seg of segs) for (const k of Object.keys(seg) as (keyof Seg)[]) if (seg[k] === undefined) delete seg[k]
+  return segs
 }
 
 function lighten(hex: string): string {
@@ -123,9 +120,10 @@ async function list($: EngineInterface, dir: string): Promise<FileNode[]> {
 }
 
 async function loadDirs($: EngineInterface, dirs: string[]): Promise<Map<string, FileNode[]>> {
-  const listed = new Map<string, FileNode[]>()
-  for (const dir of dirs) listed.set(dir, await list($, dir))
+  const root = (await get($)).root
+  const listed = new Map<string, FileNode[]>(await Promise.all(dirs.map(async dir => [dir, await list($, dir)] as const)))
   await patch($, t => {
+    if (t.root !== root) return {}
     let nodes = t.nodes
     for (const [dir, kids] of listed) nodes = replaceChildren(nodes, dir, kids)
     return { nodes }
@@ -141,33 +139,29 @@ async function detectRepo($: EngineInterface): Promise<void> {
   const t = await get($)
   if (!t.root) return
   let top = ''
+  let prefix = ''
   try {
-    const run = await git($, t.root, ['rev-parse', '--show-toplevel'], 5_000)
-    top = run.exitCode === 0 ? run.stdout.trim() : ''
+    const run = await git($, t.root, ['rev-parse', '--show-prefix', '--show-toplevel'], 5_000)
+    const [p = '', tl = ''] = run.exitCode === 0 ? run.stdout.split('\n') : []
+    prefix = p.trim()
+    top = tl.trim()
   } catch {
     top = ''
   }
-  await patch($, cur => (cur.root === t.root ? { top } : {}))
+  await patch($, cur => (cur.root === t.root ? { top, prefix } : {}))
 }
 
 async function readGit($: EngineInterface): Promise<void> {
   const t = await get($)
   if (!t.root || !t.top) return
   const root = t.root
-  const top = t.top
   try {
     const status = await git($, root, ['status', '--porcelain=v1', '-b', '-z', '--ignored=traditional', '--untracked-files=normal', '--', '.'])
     if (status.exitCode !== 0) return
-    const parsed = parseGit(status.stdout, top)
+    const parsed = parseGit(status.stdout, root, t.prefix)
     const diff: Record<string, [number, number]> = {}
     const head = await git($, root, ['diff', 'HEAD', '--numstat', '-z', '--', '.'])
-    if (head.exitCode === 0) parseNumstat(head.stdout, top, diff)
-    else {
-      const staged = await git($, root, ['diff', '--cached', '--numstat', '-z', '--', '.'])
-      if (staged.exitCode === 0) parseNumstat(staged.stdout, top, diff)
-      const work = await git($, root, ['diff', '--numstat', '-z', '--', '.'])
-      if (work.exitCode === 0) parseNumstat(work.stdout, top, diff)
-    }
+    if (head.exitCode === 0) parseNumstat(head.stdout, root, t.prefix, diff)
     const files = { ...parsed.files }
     if (parsed.untrackedDirs.length) {
       const others = await git($, root, ['ls-files', '-o', '--exclude-standard', '-z', '--', ...parsed.untrackedDirs.map(d => d.slice(root.length + 1) || '.')])
@@ -192,18 +186,17 @@ async function readGit($: EngineInterface): Promise<void> {
 }
 
 function refreshGit($: EngineInterface): Promise<void> {
-  if (gitRun) {
-    gitAgain = true
+  if (!gitRun) {
+    gitRun = readGit($).finally(() => {
+      gitRun = null
+    })
     return gitRun
   }
-  gitRun = readGit($).finally(() => {
-    gitRun = null
-    if (gitAgain) {
-      gitAgain = false
-      void refreshGit($)
-    }
+  gitNext ??= gitRun.then(() => {
+    gitNext = null
+    return refreshGit($)
   })
-  return gitRun
+  return gitNext
 }
 
 async function reset($: EngineInterface, root: string, focus = false): Promise<void> {
@@ -220,39 +213,36 @@ async function reset($: EngineInterface, root: string, focus = false): Promise<v
   await refreshGit($)
 }
 
-function isLoaded(t: FileTree, dir: string): boolean {
-  return dir === t.root ? t.nodes.some(n => n.parent === dir) : Boolean(t.nodes.find(n => n.id === dir)?.loaded)
-}
-
 async function revealPaths($: EngineInterface, paths: string[]): Promise<void> {
+  const tried = new Set<string>()
   for (let pass = 0; pass < 32; pass++) {
     const t = await get($)
+    const loaded = new Set(t.nodes.filter(n => n.loaded).map(n => n.id))
+    if (t.nodes.some(n => n.parent === t.root)) loaded.add(t.root)
     const need = new Set<string>()
     for (const p of paths) {
       for (const dir of [t.root, ...ancestorsOf(p, t.root).reverse()]) {
-        if (!isLoaded(t, dir)) {
-          need.add(dir)
+        if (!loaded.has(dir)) {
+          if (!tried.has(dir)) need.add(dir)
           break
         }
       }
     }
     if (need.size === 0) return
+    for (const dir of need) tried.add(dir)
     await loadDirs($, [...need])
   }
 }
 
-async function markerPath($: EngineInterface): Promise<string> {
-  const base = (await $.env.get('XDG_RUNTIME_DIR')) || (await $.env.get('TMPDIR')) || '/tmp'
-  return `${base.replace(/\/$/, '')}/claude-filetree.marker`
+function pruneArgs(extra: string[] = []): string[] {
+  return ['(', ...PRUNE.flatMap((name, i) => (i === 0 ? ['-name', name] : ['-o', '-name', name])), ...extra.flatMap(p => ['-o', '-path', p]), ')', '-prune', '-o']
 }
 
-async function changedSince($: EngineInterface, root: string, marker: string): Promise<string[]> {
-  const prune = PRUNE.flatMap((name, i) => (i === 0 ? ['-name', name] : ['-o', '-name', name]))
+async function changedSince($: EngineInterface, root: string, sinceMs: number, ignored: string[]): Promise<string[]> {
+  const dirs = ignored.filter(p => p.startsWith(root + '/')).slice(0, IGNORED_PRUNE_LIMIT)
   try {
-    const run = await $.process.run(['find', root, '-xdev', '(', ...prune, ')', '-prune', '-o', '-newer', marker, '-print'], {
-      timeoutMs: 8_000,
-    })
-    return run.stdout.split('\n').filter(p => p && p !== root && p !== marker)
+    const run = await $.process.run(['find', root, '-xdev', ...pruneArgs(dirs), '-newermt', `@${(sinceMs / 1000).toFixed(3)}`, '-print'], { timeoutMs: 8_000 })
+    return run.stdout.split('\n').filter(p => p && p !== root)
   } catch {
     return []
   }
@@ -262,9 +252,11 @@ async function flash($: EngineInterface, tones: Record<string, string>): Promise
   const unique = Object.keys(tones)
   if (unique.length === 0) return
   const mine = ++generation
+  const root = (await get($)).root
   blink?.cancel()
   blink = null
   await patch($, cur => {
+    if (cur.root !== root) return {}
     const open = new Set(cur.expanded)
     const bright = new Set(unique)
     const dim = new Set<string>()
@@ -297,21 +289,11 @@ async function flash($: EngineInterface, tones: Record<string, string>): Promise
     }
   })
   if (generation !== mine) return
-  await $.state.set(PHASE, 0)
-  let ticks = 0
   const timer = $.clock.every(FLASH_MS, () => {
-    if (generation !== mine) {
-      timer.cancel()
-      return
-    }
-    ticks += 1
-    if (ticks >= FLASH_TICKS) {
-      timer.cancel()
-      blink = null
-      void patch($, () => ({ flash: [], flashDim: [], flashOn: false, flashTones: {} }))
-      return
-    }
-    void $.state.set(PHASE, ticks)
+    timer.cancel()
+    if (generation !== mine) return
+    blink = null
+    void patch($, () => ({ flash: [], flashDim: [], flashOn: false, flashTones: {} }))
   })
   blink = timer
 }
@@ -326,6 +308,7 @@ async function followCwd($: EngineInterface): Promise<boolean> {
 }
 
 type Pending = { actions: GitAction[]; ids: number[] }
+type Job = { p: Pending | null; since: number; initRepo: boolean }
 
 async function startGit($: EngineInterface, actions: GitAction[]): Promise<number[]> {
   const now = await $.clock.now()
@@ -344,172 +327,136 @@ async function startGit($: EngineInterface, actions: GitAction[]): Promise<numbe
       plain: a.icon.plain,
     })),
   ])
-  if (!busyTimer) {
-    let tick = 0
-    const timer = $.clock.every(FLASH_MS, () => {
-      tick += 1
-      void (async () => {
-        const running = (await activities($)).some(a => a.state === 'running')
-        if (!running) {
-          timer.cancel()
-          if (busyTimer === timer) busyTimer = null
-          return
-        }
-        await $.state.set(BUSY, tick)
-      })()
-    })
-    busyTimer = timer
-  }
   return ids
 }
 
-async function finishGit($: EngineInterface, p: Pending, ok: boolean, output: string): Promise<void> {
+async function finishGit($: EngineInterface, p: Pending, ok: boolean): Promise<void> {
   const t = await get($)
-  const details: Record<string, string> = {}
-  if (ok && t.top) {
-    if (p.actions.some(a => a.verb === 'commit')) {
-      try {
-        const log = await git($, t.root, ['log', '-1', '--format=%h %s'], 5_000)
-        if (log.exitCode === 0) details.commit = log.stdout.trim()
-      } catch {
-        details.commit = ''
-      }
+  let commit = ''
+  if (ok && t.top && p.actions.some(a => a.verb === 'commit')) {
+    try {
+      const log = await git($, t.root, ['log', '-1', '--format=%h'], 5_000)
+      commit = log.exitCode === 0 ? log.stdout.trim() : ''
+    } catch {
+      commit = ''
     }
-    const url = output.match(/https:\/\/github\.com\/[^\s)]+/)?.[0]
-    if (url) details.url = url
   }
   const now = await $.clock.now()
-  const after = await get($)
   await setActivities($, cur =>
     cur.map(a => {
       const i = p.ids.indexOf(a.id)
-      if (i < 0) return a
-      const action = p.actions[i]
+      const action = i < 0 ? undefined : p.actions[i]
       if (!action) return a
-      const detail =
-        action.verb === 'commit'
-          ? (details.commit ?? '')
-          : action.verb === 'push'
-            ? after.branch
-              ? `${after.branch.head}${after.branch.upstream ? ` → ${after.branch.upstream}` : ''}`
-              : ''
-            : action.kind.startsWith('gh ')
-              ? (details.url ?? '')
-              : ''
-      return { ...a, state: ok ? 'done' : 'failed', label: ok ? action.done : `${action.verb} failed`, detail, at: now }
+      return { ...a, state: ok ? 'done' : 'failed', label: ok ? action.done : `${action.verb} failed`, detail: action.verb === 'commit' ? commit : '', at: now }
     }),
   )
+  const expire = $.clock.every(ACTIVITY_TTL_MS + 500, () => {
+    expire.cancel()
+    void setActivities($, cur => cur.filter(a => a.state === 'running' || a.at > now))
+  })
 }
 
-async function gitPaths($: EngineInterface, root: string, top: string, committed: boolean): Promise<string[]> {
+async function gitPaths($: EngineInterface, root: string, prefix: string, committed: boolean): Promise<string[]> {
+  const map = mapper(root, prefix)
   try {
     const run = committed
-      ? await git($, root, ['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', 'HEAD'], 5_000)
+      ? await git($, root, ['diff-tree', '--root', '--no-commit-id', '--name-only', '-r', '-z', 'HEAD'], 5_000)
       : await git($, root, ['diff', '--cached', '--name-only', '-z'], 5_000)
-    return run.exitCode === 0 ? run.stdout.split('\0').filter(Boolean).map(rel => join(top, rel)) : []
+    return run.exitCode === 0 ? run.stdout.split('\0').filter(Boolean).flatMap(rel => map(rel) ?? []) : []
   } catch {
     return []
   }
 }
 
-async function afterBash($: EngineInterface, p: Pending | null, marker: string, initRepo: boolean): Promise<void> {
+async function exists($: EngineInterface, path: string): Promise<boolean> {
+  try {
+    await $.fs.stat(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
+  const reads = queuedReads
+  queuedReads = []
   if (await followCwd($)) return
   const t = await get($)
   if (!t.root) return
-  if (initRepo) await detectRepo($)
-  else if (!t.top) {
-    try {
-      await $.fs.stat(join(t.root, '.git'))
-      await detectRepo($)
-    } catch {
-      return
-    }
-  }
-  await refreshGit($)
+  const actions = jobs.flatMap(j => j.p?.actions ?? [])
+  const since = Math.min(...jobs.map(j => j.since))
+  if (jobs.some(j => j.initRepo)) await detectRepo($)
+  else if (!t.top && (await exists($, join(t.root, '.git')))) await detectRepo($)
+  if ((await get($)).top) await refreshGit($)
   const fresh = await get($)
   const ignored = new Set(fresh.ignored)
-  const hits = marker ? (await changedSince($, t.root, marker)).filter(x => !underAny(x, ignored, t.root)).slice(0, FIND_LIMIT) : []
-  await revealPaths($, hits)
-  const loaded = await get($)
-  const dirs = [loaded.root, ...loaded.nodes.filter(n => n.kind === 'dir' && n.loaded).map(n => n.id)]
-  const before = new Map(loaded.nodes.map(n => [n.id, n.mtime]))
-  const listed = await loadDirs($, dirs)
-  const changed: string[] = []
-  for (const kids of listed.values()) {
-    for (const k of kids) {
-      if (k.kind === 'dir') continue
-      const old = before.get(k.id)
-      if (old === undefined || old !== k.mtime) changed.push(k.id)
-    }
-  }
-  const final = await get($)
-  const present = new Set(final.nodes.map(n => n.id))
   const tones: Record<string, string> = {}
-  const touchTone = p?.actions.find(a => !['commit', 'push', 'add'].includes(a.verb))?.tone ?? 'orange'
-  for (const id of [...hits.filter(x => present.has(x)), ...changed]) if (!underAny(id, ignored, t.root)) tones[id] = touchTone
-  const reads = queuedReads.filter(r => (r === t.root || r.startsWith(t.root + '/')) && !underAny(r, ignored, t.root))
-  queuedReads = []
-  const found: string[] = []
-  for (const r of reads) {
-    if (found.length >= READ_REVEAL_LIMIT) break
-    try {
-      await $.fs.stat(r)
-      if (r !== t.root) found.push(r)
-    } catch {
-      continue
+  if (showWrites) {
+    const hits = (await changedSince($, t.root, since, fresh.ignored)).filter(x => !underAny(x, ignored, t.root)).slice(0, FIND_LIMIT)
+    await revealPaths($, hits)
+    const loaded = await get($)
+    const open = new Set(loaded.expanded)
+    const dirs = [...new Set([loaded.root, ...loaded.nodes.filter(n => n.kind === 'dir' && n.loaded && open.has(n.id)).map(n => n.id), ...hits.map(dirname)])].filter(
+      d => d === loaded.root || d.startsWith(loaded.root + '/'),
+    )
+    await loadDirs($, dirs)
+    const present = new Set((await get($)).nodes.map(n => n.id))
+    const touchTone = actions.find(a => !['commit', 'push', 'add'].includes(a.verb))?.tone ?? 'orange'
+    for (const id of hits) if (present.has(id)) tones[id] = touchTone
+  }
+  if (showReads) {
+    const found: string[] = []
+    for (const r of reads) {
+      if (found.length >= READ_REVEAL_LIMIT) break
+      if (r !== t.root && r.startsWith(t.root + '/') && !underAny(r, ignored, t.root) && (await exists($, r))) found.push(r)
     }
-  }
-  if (found.length) {
-    await revealPaths($, found)
-    const shown = new Set((await get($)).nodes.map(n => n.id))
-    for (const r of found) if (shown.has(r) && !tones[r]) tones[r] = 'purple'
-  }
-  if (p) {
-    const committed = p.actions.some(a => a.verb === 'commit')
-    if ((committed || p.actions.some(a => a.verb === 'add')) && final.top) {
-      const paths = await gitPaths($, final.root, final.top, committed)
-      const inside = paths.filter(x => x.startsWith(final.root + '/') && !underAny(x, ignored, final.root)).slice(0, READ_REVEAL_LIMIT)
-      await revealPaths($, inside)
+    if (found.length) {
+      await revealPaths($, found)
       const shown = new Set((await get($)).nodes.map(n => n.id))
-      for (const x of inside) if (shown.has(x)) tones[x] = 'green'
+      for (const r of found) if (shown.has(r) && !tones[r]) tones[r] = 'purple'
     }
-    const pushLike = p.actions.find(a => ['push', 'pull', 'fetch', 'checkout', 'switch', 'branch', 'merge', 'rebase', 'tag'].includes(a.verb) || a.kind.startsWith('gh '))
-    if (pushLike) tones[BRANCH_ROW] = pushLike.tone
-    if (p.actions.some(a => a.verb === 'commit')) tones[BRANCH_ROW] = tones[BRANCH_ROW] ?? 'green'
   }
-  if (!showWrites) for (const id of Object.keys(tones)) if (tones[id] !== 'purple') delete tones[id]
+  if (showWrites && actions.length) {
+    const final = await get($)
+    const committed = actions.some(a => a.verb === 'commit')
+    if ((committed || actions.some(a => a.verb === 'add')) && final.top) {
+      const paths = (await gitPaths($, final.root, final.prefix, committed)).filter(x => !underAny(x, ignored, final.root)).slice(0, READ_REVEAL_LIMIT)
+      await revealPaths($, paths)
+      const shown = new Set((await get($)).nodes.map(n => n.id))
+      for (const x of paths) if (shown.has(x)) tones[x] = 'green'
+    }
+    const pushLike = actions.find(a => ['push', 'pull', 'fetch', 'checkout', 'switch', 'branch', 'merge', 'rebase', 'tag'].includes(a.verb) || a.kind.startsWith('gh '))
+    if (pushLike) tones[BRANCH_ROW] = pushLike.tone
+    else if (committed) tones[BRANCH_ROW] = 'green'
+  }
   await flash($, tones)
 }
 
-function scheduleScan($: EngineInterface, p: Pending | null, marker: string, initRepo: boolean): void {
-  if (scanning) {
-    scanAgain = true
-    return
-  }
-  scanning = afterBash($, p, marker, initRepo).finally(() => {
-    scanning = null
-    if (scanAgain) {
-      scanAgain = false
-      scheduleScan($, null, marker, false)
+function scheduleScan($: EngineInterface, job: Job): void {
+  scanJobs.push(job)
+  if (scanning) return
+  scanning = (async () => {
+    while (scanJobs.length) {
+      const jobs = scanJobs
+      scanJobs = []
+      await afterBash($, jobs)
     }
+  })().finally(() => {
+    scanning = null
   })
 }
 
-async function touched($: EngineInterface, paths: string[], tone = 'orange'): Promise<void> {
+async function touched($: EngineInterface, paths: string[], tone: string, show: boolean): Promise<void> {
   if (await followCwd($)) return
   const t = await get($)
   const inside = paths.filter(p => p === t.root || p.startsWith(t.root + '/'))
   if (inside.length === 0) return
-  const have = new Set(t.nodes.map(n => n.id))
-  const missing = new Set<string>()
-  for (const p of inside) {
-    for (const x of [p, ...ancestorsOf(p, t.root)]) if (x !== t.root && !have.has(x)) missing.add(dirname(x))
-  }
-  const parents = [...missing].filter(d => d === t.root || have.has(d) || missing.has(d)).sort((a, b) => a.length - b.length)
-  if (parents.length) await loadDirs($, parents)
-  await revealPaths($, inside)
-  await loadDirs($, [...new Set(inside.map(dirname))])
-  await refreshGit($)
+  if (tone !== 'purple') {
+    await revealPaths($, inside.map(dirname))
+    await loadDirs($, [...new Set(inside.map(dirname))].filter(d => d === t.root || d.startsWith(t.root + '/')))
+    await refreshGit($)
+  } else await revealPaths($, inside)
+  if (!show) return
   const tones: Record<string, string> = {}
   for (const p of inside) tones[p] = tone
   await flash($, tones)
@@ -525,18 +472,20 @@ async function reveal($: EngineInterface, paths: string[]): Promise<void> {
   })
 }
 
-async function indexPaths($: EngineInterface, t: FileTree): Promise<string[]> {
-  if (searchIndex?.root === t.root) return searchIndex.paths
+async function listAll($: EngineInterface, t: FileTree): Promise<string[]> {
   try {
     const run = t.top
       ? await git($, t.root, ['ls-files', '-co', '--exclude-standard', '-z'], 10_000)
-      : await $.process.run(['find', t.root, '-xdev', '(', ...PRUNE.flatMap((name, i) => (i === 0 ? ['-name', name] : ['-o', '-name', name])), ')', '-prune', '-o', '-type', 'f', '-print0'], { timeoutMs: 10_000 })
-    const paths = run.stdout.split('\0').filter(Boolean).map(p => (p.startsWith('/') ? p : join(t.root, p)))
-    searchIndex = { root: t.root, paths }
-    return paths
+      : await $.process.run(['find', t.root, '-xdev', ...pruneArgs(), '-type', 'f', '-print0'], { timeoutMs: 10_000 })
+    return run.stdout.split('\0').filter(Boolean).map(p => (p.startsWith('/') ? p : join(t.root, p)))
   } catch {
     return []
   }
+}
+
+function indexPaths($: EngineInterface, t: FileTree): Promise<string[]> {
+  if (searchIndex?.root !== t.root) searchIndex = { root: t.root, paths: listAll($, t) }
+  return searchIndex.paths
 }
 
 async function search($: EngineInterface, query: string): Promise<void> {
@@ -559,7 +508,7 @@ async function launch($: EngineInterface, argv: string[]): Promise<void> {
 }
 
 async function toggle($: EngineInterface, n: FileNode): Promise<void> {
-  if (n.kind === 'dir' && !n.loaded) await loadDirs($, [n.id])
+  if (n.kind === 'dir' && !(await get($)).expanded.includes(n.id)) await loadDirs($, [n.id])
   await patch($, t => {
     const open = new Set(t.expanded)
     if (n.kind === 'dir') open.has(n.id) ? open.delete(n.id) : open.add(n.id)
@@ -621,40 +570,32 @@ export const register: Register = (on, options) => {
     const arg = (e.args ?? '').trim()
     const cwd = await $.session.cwd()
     follow = !arg
-    const root = arg ? (arg.startsWith('/') ? arg : `${cwd}/${arg}`).replace(/\/$/, '') : cwd
+    const root = arg ? resolve(cwd, arg) : cwd
     await reset($, root, true)
     return { text: `File tree on ${shortPath(root)}${follow ? ' (follows the cwd)' : ''}.` }
   })
 
   on('tool.call', async ($, e, next) => {
     if (e.tool !== 'Edit' && e.tool !== 'Write' && e.tool !== 'NotebookEdit' && e.tool !== 'Bash') return next(e)
-    let marker = ''
-    let pending: Pending | null = null
     const command = e.tool === 'Bash' ? e.command : ''
-    if (e.tool === 'Bash') {
-      try {
-        marker = await markerPath($)
-        await $.fs.write(marker, '')
-      } catch {
-        marker = ''
-      }
-      const actions = gitActions(command)
-      if (actions.length) {
-        pending = { actions, ids: await startGit($, actions) }
-      }
+    const since = await $.clock.now()
+    const cwd = e.tool === 'Bash' ? await $.session.cwd() : ''
+    const actions = gitActions(command)
+    const pending: Pending | null = actions.length ? { actions, ids: await startGit($, actions) } : null
+    let result: Awaited<ReturnType<typeof next>>
+    try {
+      result = await next(e)
+    } catch (err) {
+      if (pending) await finishGit($, pending, false)
+      throw err
     }
-    const result = await next(e)
     const failed = Boolean(result.deny || result.isError)
-    if (pending) {
-      const output = !failed && e.tool === 'Bash' && result.result && typeof result.result === 'object' && 'stdout' in result.result ? String(result.result.stdout) : ''
-      await finishGit($, pending, !failed, output)
-    }
+    if (pending) await finishGit($, pending, !failed)
     if (failed) return result
     if (e.tool === 'Bash') {
       const stdout = result.result && typeof result.result === 'object' && 'stdout' in result.result ? String(result.result.stdout) : ''
-      if (showReads) queuedReads.push(...readTargets(command, await $.session.cwd(), stdout))
-      const initRepo = Boolean(pending?.actions.some(a => a.init)) || /\bgit\s+(init|clone)\b/.test(command)
-      scheduleScan($, pending, marker, initRepo)
+      if (showReads) queuedReads.push(...readTargets(command, cwd, stdout))
+      scheduleScan($, { p: pending, since, initRepo: actions.some(a => a.init) })
     } else {
       const file =
         'file_path' in e && typeof e.file_path === 'string'
@@ -662,16 +603,15 @@ export const register: Register = (on, options) => {
           : 'notebook_path' in e && typeof e.notebook_path === 'string'
             ? e.notebook_path
             : ''
-      if (file && showWrites) void touched($, [file])
-      else if (file) void refreshGit($)
+      if (file) void touched($, [file], 'orange', showWrites)
     }
     return result
   })
 
   on('tool.call', { tool: 'Read' }, async ($, e, next) => {
     const result = await next(e)
-    if (result.deny || result.isError || e.tool !== 'Read') return result
-    if (showReads) void touched($, [e.file_path], 'purple')
+    if (result.deny || result.isError || e.tool !== 'Read' || !showReads) return result
+    void touched($, [e.file_path], 'purple', true)
     return result
   })
 
@@ -702,7 +642,7 @@ export const register: Register = (on, options) => {
     else if (cur && (data.key === 'left' || data.key === 'h')) {
       if (cur.kind === 'dir' && t.expanded.includes(cur.id)) await toggle($, cur)
       else if (cur.parent !== t.root) await patch($, () => ({ cursor: cur.parent }))
-    } else if (cur && data.key === 'return') await (cur.kind === 'file' ? openNode($, cur) : toggle($, cur))
+    } else if (cur && data.key === 'return') await (cur.kind !== 'dir' ? openNode($, cur) : toggle($, cur))
     else if (cur && data.key === ' ') await toggle($, cur)
     return {}
   })
@@ -739,10 +679,8 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button, Input, Client } = $.ui.resolve(e)
     const t = await get($)
     const theme: Theme = (await $.state.get(THEME)).value ?? DEFAULT_THEME
-    const phase = t.flashOn ? ((await $.state.get(PHASE)).value ?? 0) : 0
-    const busy = (await $.state.get(BUSY)).value ?? 0
     const now = await $.clock.now()
-    const live = (await activities($)).filter(a => a.state === 'running' || now - a.at < ACTIVITY_TTL_MS)
+    const live = (await activities($)).filter(a => now - a.at < (a.state === 'running' ? RUNNING_MAX_MS : ACTIVITY_TTL_MS))
     const latest = [...live].reverse().find(a => a.state === 'running') ?? live[live.length - 1]
     const bright = new Set(t.flashOn ? t.flash : [])
     const dimmed = new Set(t.flashOn ? t.flashDim : [])
@@ -775,15 +713,7 @@ export const register: Register = (on, options) => {
       return out
     }
     const rootCounts = t.top ? countSegs(t.counts[t.root]) : []
-    const header = t.top ? `${t.top.split('/').pop() ?? t.top}${t.root.slice(t.top.length)}` : t.root.split('/').pop() || t.root
-
-    const shimmerText = (text: string, tone: string, dim: boolean, bold: boolean) => (
-      <Text bold={bold}>
-        {[...text].map((ch, i, all) => (
-          <Text color={shimmerColor(i, phase, all.length, dim, tone)}>{ch}</Text>
-        ))}
-      </Text>
-    )
+    const header = t.top ? [t.top.split('/').pop() ?? t.top, t.prefix.replace(/\/$/, '')].filter(Boolean).join('/') : t.root.split('/').pop() || t.root
 
     const rowSpec = (r: (typeof rows)[number]): RowSpec => {
       const n = r.node
@@ -807,20 +737,20 @@ export const register: Register = (on, options) => {
       const caret = n.kind === 'dir' ? (plain ? (r.open ? '▾' : '▸') : r.open ? CHEVRON_OPEN : CHEVRON_CLOSED) + ' ' : '  '
       const isRepo = n.kind === 'dir' && n.id === t.top
       const glyph = plain ? (n.kind === 'dir' ? '■' : '·') : fileIcon(n, r.open, isRepo)
+      const lit = isBright || isDim
       const left: Seg[] = [
         { t: '  '.repeat(r.depth) },
         { t: caret, c: theme.muted },
-        { t: glyph + ' ', c: isBright || isDim ? shimmerColor(-1, phase, name.length, isDim, tone) : iconColor },
+        lit ? { t: glyph + ' ', sh: tone, dim: isDim, one: true } : { t: glyph + ' ', c: iconColor },
+        lit ? { t: name, sh: tone, dim: isDim, b: isBright } : { t: name, c: nameColor, b: n.id === t.selected, s: status === 'D' && n.kind !== 'dir' },
       ]
-      if (isBright || isDim) for (const [i, ch] of [...name].entries()) left.push({ t: ch, c: shimmerColor(i, phase, name.length, isDim, tone), b: isBright })
-      else left.push({ t: name, c: nameColor, b: n.id === t.selected, s: status === 'D' && n.kind !== 'dir' })
       const right: Seg[] = []
       if (meta) right.push({ t: ` ${meta}`, c: theme.muted })
       if (loc && loc[0] > 0) right.push({ t: ` +${loc[0]}`, c: ADD_COLOR })
       if (loc && loc[1] > 0) right.push({ t: ` -${loc[1]}`, c: DEL_COLOR })
       right.push(...dirCounts)
       if (badge) right.push({ t: badge, c: status ? gitColor : theme.muted, b: true })
-      return { id: n.id, left, right }
+      return { id: n.id, left: clean(left), right: clean(right) }
     }
 
     const note = (text: string): RowSpec => ({ id: '', left: [{ t: text, c: theme.muted }], right: [] })
@@ -842,7 +772,9 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="row">
           <Text color={isFlash ? (TONES[tone]?.solid ?? theme.accent) : theme.accent}>{(plain ? BRANCH_ICON.plain : BRANCH_ICON.nerd) + ' '}</Text>
-          {isFlash ? shimmerText(label, tone, false, true) : <Text bold color={theme.fg}>{label}</Text>}
+          <Text bold color={isFlash ? (TONES[tone]?.solid ?? theme.fg) : theme.fg}>
+            {label}
+          </Text>
           {b.ahead > 0 && <Text color={TONES.teal?.solid}>{` ↑${b.ahead}`}</Text>}
           {b.behind > 0 && <Text color={TONES.blue?.solid}>{` ↓${b.behind}`}</Text>}
           {b.upstream && <Text color={theme.muted}>{` ${b.upstream}`}</Text>}
@@ -865,15 +797,9 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="row" marginLeft={2}>
           <Text color={color}>{icon + ' '}</Text>
-          {a.state === 'running' ? (
-            <Text bold>
-              {[...`${a.label}…`].map((ch, i, all) => (
-                <Text color={shimmerColor(i, busy, all.length, false, tone)}>{ch}</Text>
-              ))}
-            </Text>
-          ) : (
-            <Text color={color}>{a.label}</Text>
-          )}
+          <Text bold={a.state === 'running'} color={color}>
+            {a.state === 'running' ? `${a.label}…` : a.label}
+          </Text>
           {hash && <Text color={theme.muted}>{` ${hash}`}</Text>}
         </Box>
       )
@@ -919,7 +845,7 @@ export const register: Register = (on, options) => {
               onPress={() =>
                 void (async () => {
                   const cur = await get($)
-                  await loadDirs($, [cur.root, ...cur.nodes.filter(n => n.kind === 'dir' && n.loaded).map(n => n.id)])
+                  await loadDirs($, [cur.root, ...cur.expanded])
                   await detectRepo($)
                   await refreshGit($)
                 })()
@@ -953,7 +879,7 @@ export const register: Register = (on, options) => {
         <Client
           key="rows"
           module="./rows.tsx"
-          props={{ rows: JSON.parse(JSON.stringify(specs)) as RowSpec[], active: t.cursor, activeBg: theme.selection, hoverBg: lighten(theme.selection) } satisfies RowsProps}
+          props={{ rows: specs, active: t.cursor, activeBg: theme.selection, hoverBg: lighten(theme.selection), tones: SHIMMER } satisfies RowsProps}
         />
         <Box flexGrow={1} />
         {(t.selected || latest) && (
