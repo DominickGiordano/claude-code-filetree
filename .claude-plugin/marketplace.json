@@ -4,7 +4,7 @@
     "name": "Kurt Buhler"
   },
   "metadata": {
-    "description": "FileBlade-style file tree pane for Claude Code with git status, lines changed and a live view of Claude's file and git activity"
+    "description": "An IDE-style file tree for Claude Code that shows what Claude is doing and where in files"
   },
   "plugins": [
     {
