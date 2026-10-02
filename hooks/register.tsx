@@ -834,7 +834,7 @@ export const register: Register = (on, options) => {
     }
 
     return (
-      <Box flexDirection="column" minHeight={Math.max(1, (e.props.scroll?.bodyRows ?? 1) - 1)}>
+      <Box flexDirection="column" minHeight={Math.max(1, e.props.scroll?.bodyRows ?? 1)}>
         <Box flexDirection="row">
           <Text bold color={theme.accent} wrap="truncate-start">
             {header}
