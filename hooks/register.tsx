@@ -739,15 +739,6 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('classic.CwdChanged', async ($, e, next) => {
-    const result = await next(e)
-    if (follow) {
-      const cwd = posix(e.new_cwd)
-      if ((await get($)).root !== cwd) await reset($, cwd)
-    }
-    return result
-  })
-
   on('command.run', { command: 'filetree' }, async ($, e) => {
     const arg = (e.args ?? '').trim()
     const cwd = await cwdOf($)
@@ -786,6 +777,7 @@ export const register: Register = (on, options) => {
       const stdout = result.result && typeof result.result === 'object' && 'stdout' in result.result ? String(result.result.stdout) : ''
       if (showReads) queuedReads.push(...readTargets(command, cwd, stdout, home))
       scheduleScan($, { p: pending, since, initRepo: actions.some(a => a.init), readOnly: quiet })
+      if (follow && /(^|[;&|\s])(cd|pushd|popd)(\s|$)/.test(command)) $.clock.after(400, () => void followCwd($))
     } else {
       const file =
         'file_path' in e && typeof e.file_path === 'string'
