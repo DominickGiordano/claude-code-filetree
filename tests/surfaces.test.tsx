@@ -20,8 +20,9 @@ function world(on: any, w: World, ran: Ran) {
     throw new Error('no theme file')
   })
   const norm = (p: string) => p.replace(/\\/g, '/').replace(/^.*?(?=[A-Za-z]:\/)/, '')
+  const dirOf = (p: string) => w.dirs[p] ?? w.dirs[p.replace(/^[A-Za-z]:/, '')]
   on('fs.list', (_$: any, e: any) => {
-    const kids = w.dirs[norm(e.path)]
+    const kids = dirOf(norm(e.path))
     if (!kids) throw new Error(`ENOENT ${e.path}`)
     return { value: kids.map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: 1_700_000_000_000, isLink: false })) }
   })
@@ -29,7 +30,7 @@ function world(on: any, w: World, ran: Ran) {
     const p = norm(e.path)
     const parent = p.slice(0, p.lastIndexOf('/')) || '/'
     const name = p.slice(p.lastIndexOf('/') + 1)
-    const hit = w.dirs[p] ? 'dir' : w.dirs[parent]?.find(([n]) => n === name)?.[1]
+    const hit = dirOf(p) ? 'dir' : dirOf(parent)?.find(([n]) => n === name)?.[1]
     if (!hit) throw new Error(`ENOENT ${e.path}`)
     return { value: { kind: hit, size: 1, mtimeMs: name === 'a.ts' ? 1_800_000_000_500 : 1_700_000_000_000, isLink: false } }
   })
