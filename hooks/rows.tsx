@@ -1,11 +1,19 @@
 import type { ClientModule } from 'claude-code'
 
-export type Seg = { t: string; c?: string; b?: boolean; s?: boolean; i?: boolean; sh?: string; dim?: boolean; one?: boolean }
+export type Seg = { t: string; c?: string; b?: boolean; s?: boolean; i?: boolean; sh?: string; dim?: boolean; one?: boolean; spin?: boolean }
 export type RowSpec = { id: string; left: Seg[]; right: Seg[] }
-export type RowsProps = { rows: RowSpec[]; active: string; activeBg: string; hoverBg: string; tones: Record<string, { bright: string[]; dim: string[] }> }
+export type RowsProps = {
+  rows: RowSpec[]
+  active: string
+  activeBg: string
+  hoverBg: string
+  tones: Record<string, { bright: string[]; dim: string[] }>
+  spinner?: string[]
+}
 type Local = { hover: number; phase: number; ref: { lit: boolean } }
 
 const TICK_MS = 90
+const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
 function shimmer(i: number, phase: number, len: number, palette: string[]): string {
   const band = ((phase * 1.6) % (len + 8)) - 4
@@ -24,7 +32,7 @@ const Rows: ClientModule<RowsProps, Local> = (props, surface) => {
     })
   }
   const state = surface.state ?? { hover: -1, phase: 0, ref: { lit: false } }
-  state.ref.lit = props.rows.some(r => r.left.some(s => s.sh))
+  state.ref.lit = props.rows.some(r => r.left.some(s => s.sh || s.spin) || r.right.some(s => s.sh || s.spin))
   surface.onPointer(e => {
     const cur = surface.state ?? state
     if (e.type === 'leave' || e.y < 0 || e.y >= props.rows.length) {
@@ -36,7 +44,15 @@ const Rows: ClientModule<RowsProps, Local> = (props, surface) => {
     if (e.type === 'down' && (e.button ?? 'left') === 'left' && row?.id) surface.post({ press: row.id, ctrl: Boolean(e.ctrl), shift: Boolean(e.shift) })
   })
   surface.onKey(e => surface.post({ key: e.key, ctrl: Boolean(e.ctrl), shift: Boolean(e.shift) }))
+  const frames = props.spinner?.length ? props.spinner : FRAMES
   const draw = (s: Seg) => {
+    if (s.spin) {
+      return (
+        <Text color={s.c} bold={s.b}>
+          {s.t + (frames[state.phase % frames.length] ?? '')}
+        </Text>
+      )
+    }
     const palette = s.sh ? (s.dim ? props.tones[s.sh]?.dim : props.tones[s.sh]?.bright) : undefined
     if (!palette) {
       return (

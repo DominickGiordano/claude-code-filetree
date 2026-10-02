@@ -46,6 +46,8 @@ let blink: Timer | null = null
 let generation = 0
 let lastPress = { key: '', at: 0 }
 let plain = false
+let noNerd = false
+let glyphSetting = 'auto'
 let follow = true
 let scanning: Promise<void> | null = null
 let scanJobs: Job[] = []
@@ -539,6 +541,7 @@ function shortPath(path: string): string {
 }
 
 export const register: Register = (on, options) => {
+  glyphSetting = typeof options?.glyphs === 'string' ? options.glyphs : 'auto'
   const activity = typeof options?.activity === 'string' ? options.activity : 'reads and writes'
   showReads = activity.includes('reads')
   showWrites = activity.includes('writes')
@@ -547,9 +550,9 @@ export const register: Register = (on, options) => {
     void (async () => {
       try {
         const nerd = await $.process.run(['fc-list', ':charset=f04eb', 'family'], { timeoutMs: 5_000 })
-        plain = nerd.stdout.trim().length === 0
+        noNerd = nerd.stdout.trim().length === 0
       } catch {
-        plain = true
+        noNerd = true
       }
       try {
         await $.state.set(THEME, parseTheme(String(await $.fs.read(`${(await $.env.get('HOME')) ?? ''}/${THEME_FILE}`))))
@@ -676,6 +679,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (e.surface !== 'terminal' && e.surface !== 'desktop') return next(e)
+    plain = glyphSetting === 'plain' || (glyphSetting === 'auto' && (noNerd || e.surface === 'desktop'))
     const { Box, Text, Button, Input, Client } = $.ui.resolve(e)
     const t = await get($)
     const theme: Theme = (await $.state.get(THEME)).value ?? DEFAULT_THEME

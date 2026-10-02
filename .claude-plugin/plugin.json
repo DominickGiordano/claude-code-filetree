@@ -25,6 +25,17 @@
         "reads",
         "none"
       ]
+    },
+    "glyphs": {
+      "type": "string",
+      "title": "Glyphs",
+      "description": "Icon set: auto uses Nerd Font icons when one is installed here, except in the desktop app; plain uses Unicode only",
+      "default": "auto",
+      "options": [
+        "auto",
+        "nerd",
+        "plain"
+      ]
     }
   }
 }
