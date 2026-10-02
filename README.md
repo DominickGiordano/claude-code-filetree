@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Claude_Code-%E2%89%A5_2.1.287-D97757?logo=claude&logoColor=fff" alt="Claude Code 2.1.287 or newer">
-  <img src="https://img.shields.io/badge/version-0.2.14-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.3.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/type-mod-6f42c1" alt="Claude Code mod">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
@@ -26,21 +26,21 @@
 
 ## Installation
 
-The repo is its own plugin marketplace. Run this in the terminal:
+This fork is its own plugin marketplace, named `filetree-context-map` so it can sit beside the upstream one. Run this in the terminal:
 
 ```bash
-claude plugin marketplace add data-goblin/claude-code-filetree
-claude plugin install filetree@claude-code-filetree
+claude plugin marketplace add DominickGiordano/claude-code-filetree
+claude plugin install filetree@filetree-context-map
 ```
 
 Or inside a Claude Code session:
 
 ```text
-/plugin marketplace add data-goblin/claude-code-filetree
-/plugin install filetree@claude-code-filetree
+/plugin marketplace add DominickGiordano/claude-code-filetree
+/plugin install filetree@filetree-context-map
 ```
 
-Installed it as `filetree@filetree` before the repository was renamed? Nothing to do: that install keeps loading and keeps receiving updates.
+The plugin is still named `filetree`, so uninstall `filetree@claude-code-filetree` first if you have the upstream build installed.
 
 ## Features
 
@@ -73,11 +73,20 @@ You can resize the pane with the mouse, or by setting custom `pane:grow` or `pan
   <img src="media/filetree-resize.gif" alt="Dragging the filetree pane edge to resize it" width="900">
 </p>
 
+## Additions in this fork
+
+- **In context:** files Claude has read or edited since the last compaction or `/clear` show an approximate token weight (`· 3.1k`) in purple, folders show the sum of their files, and the header shows the total. The estimate is the tool result Claude read plus what it wrote, at about 4 characters per token; images count by their display size. Compaction or `/clear` resets it.
+- **Who touched it:** the line under the tree names what happened to the file under the cursor, who did it and when, e.g. `edited by Explore · 2m ago`. Subagent reads and edits are attributed to the agent type and do not count toward the main context.
+- **Filters:** the `◇` button (or `f`) cycles through all files, files in context (`◆ ctx`) and files read, written or committed this session (`◈ touched`).
+- **@ mention:** the `@` button (or `@` / `m` on the cursor row) puts `@path` into the prompt box at the cursor as a draft, without sending it.
+- **Open in editor:** the `✎` button (or `e`) runs `code -g path:line`, at the line Claude last read or edited, and falls back to the default app when `code` is missing. Set **Editor** in `/config` to another command; `{path}` and `{line}` are filled in (`zed {path}:{line}`), otherwise the path is appended. Terminal editors such as `$EDITOR=vim` need a TTY the mod cannot give them, so they are not supported.
+
 ## Settings
 
-Both settings are in `/config` under filetree.
+All settings are in `/config` under filetree.
 
 - **Claude activity:** what shimmers: `reads and writes` (default), `writes`, `reads` or `none`. Git status, line counts and the git status at the bottom always show.
+- **Editor:** the command the open-in-editor action runs (see above). `auto` (default) tries `code`, then the default app.
 - **Glyphs:** `auto` (default) uses Nerd Font icons when a Nerd Font is installed and your terminal started after it was installed, plain Unicode in the desktop app, and Nerd Font over SSH. `nerd` or `plain` forces one.
 
 ## herdr
