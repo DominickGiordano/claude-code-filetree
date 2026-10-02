@@ -1,7 +1,7 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Activity, FileNode, FileTree, Theme } from '../types'
-import { BRANCH_ICON, type GitAction, gitActions, TONES } from './git'
+import { BRANCH_ICON, type GitAction, gitActions, readTargets, TONES } from './git'
 import type { RowSpec, RowsProps, Seg } from './rows'
 import { CHEVRON_CLOSED, CHEVRON_OPEN, fileIcon, GIT_COLOR } from './icons'
 import {
@@ -33,6 +33,7 @@ const FLASH_TICKS = 30
 const FLASH_MS = 90
 const DOUBLE_MS = 450
 const FIND_LIMIT = 200
+const READ_REVEAL_LIMIT = 12
 const ACTIVITY_TTL_MS = 45_000
 const ADD_COLOR = '#98c379'
 const DEL_COLOR = '#e06c75'
@@ -49,6 +50,7 @@ let scanning: Promise<void> | null = null
 let scanAgain = false
 let gitRun: Promise<void> | null = null
 let gitAgain = false
+let queuedReads: string[] = []
 let activityId = 0
 
 function shimmerColor(i: number, phase: number, len: number, dim: boolean, tone: string): string {
@@ -282,14 +284,12 @@ async function flash($: EngineInterface, tones: Record<string, string>): Promise
       }
     }
     for (const id of bright) dim.delete(id)
-    const last = unique.filter(id => id !== BRANCH_ROW).pop()
     return {
       flash: [...bright],
       flashDim: [...dim],
       flashOn: true,
       flashTones: all,
       expanded: [...open],
-      cursor: last ?? cur.cursor,
     }
   })
   if (generation !== mine) return
@@ -432,6 +432,23 @@ async function afterBash($: EngineInterface, p: Pending | null, marker: string, 
   const tones: Record<string, string> = {}
   const touchTone = p?.actions.find(a => !['commit', 'push', 'add'].includes(a.verb))?.tone ?? 'orange'
   for (const id of [...hits.filter(x => present.has(x)), ...changed]) if (!underAny(id, ignored, t.root)) tones[id] = touchTone
+  const reads = queuedReads.filter(r => (r === t.root || r.startsWith(t.root + '/')) && !underAny(r, ignored, t.root))
+  queuedReads = []
+  const found: string[] = []
+  for (const r of reads) {
+    if (found.length >= READ_REVEAL_LIMIT) break
+    try {
+      await $.fs.stat(r)
+      if (r !== t.root) found.push(r)
+    } catch {
+      continue
+    }
+  }
+  if (found.length) {
+    await revealPaths($, found)
+    const shown = new Set((await get($)).nodes.map(n => n.id))
+    for (const r of found) if (shown.has(r) && !tones[r]) tones[r] = 'purple'
+  }
   if (p) {
     if (p.actions.some(a => a.verb === 'commit' || a.verb === 'add')) {
       const tone = 'green'
@@ -592,6 +609,8 @@ export const register: Register = on => {
     }
     if (failed) return result
     if (e.tool === 'Bash') {
+      const stdout = result.result && typeof result.result === 'object' && 'stdout' in result.result ? String(result.result.stdout) : ''
+      queuedReads.push(...readTargets(command, await $.session.cwd(), stdout))
       const initRepo = Boolean(pending?.actions.some(a => a.init)) || /\bgit\s+(init|clone)\b/.test(command)
       scheduleScan($, pending, marker, initRepo)
     } else {
@@ -603,6 +622,13 @@ export const register: Register = on => {
             : ''
       if (file) void touched($, [file])
     }
+    return result
+  })
+
+  on('tool.call', { tool: 'Read' }, async ($, e, next) => {
+    const result = await next(e)
+    if (result.deny || result.isError || e.tool !== 'Read') return result
+    void touched($, [e.file_path], 'purple')
     return result
   })
 
