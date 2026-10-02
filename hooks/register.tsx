@@ -2,6 +2,7 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Activity, FileNode, FileTree, Theme } from '../types'
 import { BRANCH_ICON, type GitAction, gitActions, TONES } from './git'
+import type { RowSpec, RowsProps, Seg } from './rows'
 import { CHEVRON_CLOSED, CHEVRON_OPEN, fileIcon, GIT_COLOR } from './icons'
 import {
   ancestorsOf,
@@ -51,7 +52,6 @@ let scanAgain = false
 let gitRun: Promise<void> | null = null
 let gitAgain = false
 let activityId = 0
-const keyToId = new Map<string, string>()
 
 function shimmerColor(i: number, phase: number, len: number, dim: boolean, tone: string): string {
   const band = ((phase * 1.6) % (len + 8)) - 4
@@ -61,12 +61,10 @@ function shimmerColor(i: number, phase: number, len: number, dim: boolean, tone:
   return palette[d < 0.8 ? 3 : d < 1.8 ? 2 : d < 2.8 ? 1 : 0] ?? palette[0] ?? '#f97316'
 }
 
-function keyFor(id: string): string {
-  let x = 5381
-  for (let i = 0; i < id.length; i++) x = ((x * 33) ^ id.charCodeAt(i)) >>> 0
-  const key = `t${x.toString(36)}${id.length.toString(36)}`
-  keyToId.set(key, id)
-  return key
+function lighten(hex: string): string {
+  const v = parseInt(hex.slice(1), 16)
+  const ch = (shift: number) => Math.min(255, ((v >> shift) & 255) + 14)
+  return `#${[16, 8, 0].map(x => ch(x).toString(16).padStart(2, '0')).join('')}`
 }
 
 async function get($: EngineInterface): Promise<FileTree> {
@@ -526,6 +524,10 @@ async function press($: EngineInterface, n: FileNode): Promise<void> {
     await toggle($, n)
     return
   }
+  await openNode($, n)
+}
+
+async function openNode($: EngineInterface, n: FileNode): Promise<void> {
   if (n.kind === 'dir') {
     follow = false
     await reset($, n.id)
@@ -611,12 +613,36 @@ export const register: Register = on => {
     return result
   })
 
-  on('ui.focus', async ($, e, next) => {
-    const result = await next(e)
-    if (e.requestId !== PANE || !e.element) return result
-    const id = keyToId.get(e.element)
-    if (id && id !== (await get($)).cursor) await patch($, () => ({ cursor: id }))
-    return result
+  on('ui.message', async ($, e, next) => {
+    if (e.requestId !== PANE || e.element !== 'rows' || !e.data || typeof e.data !== 'object') return next(e)
+    const data = e.data as { press?: unknown; key?: unknown; ctrl?: unknown; shift?: unknown }
+    const t = await get($)
+    if (typeof data.press === 'string') {
+      const n = t.nodes.find(x => x.id === data.press)
+      if (!n) return {}
+      if (data.ctrl || data.shift) await openNode($, n)
+      else await press($, n)
+      return {}
+    }
+    if (typeof data.key !== 'string') return {}
+    const rows = visibleRows(t)
+    const at = rows.findIndex(r => r.node.id === t.cursor)
+    const cur = rows[at]?.node
+    const move = (d: number) => {
+      const target = rows[Math.max(0, Math.min(rows.length - 1, (at < 0 ? 0 : at) + d))]
+      return target ? patch($, () => ({ cursor: target.node.id })) : Promise.resolve()
+    }
+    if (data.key === 'up' || data.key === 'k') await move(-1)
+    else if (data.key === 'down' || data.key === 'j') await move(1)
+    else if (data.key === 'pageup') await move(-10)
+    else if (data.key === 'pagedown') await move(10)
+    else if (cur && (data.key === 'right' || data.key === 'l') && cur.kind === 'dir' && !t.expanded.includes(cur.id)) await toggle($, cur)
+    else if (cur && (data.key === 'left' || data.key === 'h')) {
+      if (cur.kind === 'dir' && t.expanded.includes(cur.id)) await toggle($, cur)
+      else if (cur.parent !== t.root) await patch($, () => ({ cursor: cur.parent }))
+    } else if (cur && data.key === 'return') await (cur.kind === 'file' ? openNode($, cur) : toggle($, cur))
+    else if (cur && data.key === ' ') await toggle($, cur)
+    return {}
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -647,8 +673,8 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
-    if (e.surface === 'mobile') return next(e)
-    const { Box, Text, Button, Input } = $.ui.resolve(e)
+    if (e.surface !== 'terminal' && e.surface !== 'desktop') return next(e)
+    const { Box, Text, Button, Input, Client } = $.ui.resolve(e)
     const t = await get($)
     const theme: Theme = (await $.state.get(THEME)).value ?? DEFAULT_THEME
     const phase = t.flashOn ? ((await $.state.get(PHASE)).value ?? 0) : 0
@@ -688,7 +714,7 @@ export const register: Register = on => {
       </Text>
     )
 
-    const renderRow = (r: (typeof rows)[number]) => {
+    const rowSpec = (r: (typeof rows)[number]): RowSpec => {
       const n = r.node
       const own = t.git[n.id]
       const status = own ?? (underAny(dirname(n.id), untracked, t.root) ? '?' : undefined)
@@ -696,7 +722,6 @@ export const register: Register = on => {
       const gitColor = status === 'D' || status === 'U' ? theme.urgent : status ? (GIT_COLOR[status] ?? theme.muted) : undefined
       const isBright = bright.has(n.id)
       const isDim = !isBright && dimmed.has(n.id)
-      const isFlash = isBright || isDim
       const tone = t.flashTones[n.id] ?? 'orange'
       const iconColor = isIgnored ? theme.muted : (gitColor ?? (n.hidden ? theme.muted : n.kind === 'dir' ? theme.accent : theme.muted))
       const nameColor = isIgnored ? theme.muted : (gitColor ?? (n.hidden ? theme.muted : theme.fg))
@@ -709,37 +734,30 @@ export const register: Register = on => {
       const caret = n.kind === 'dir' ? (plain ? (r.open ? '▾' : '▸') : r.open ? CHEVRON_OPEN : CHEVRON_CLOSED) + ' ' : '  '
       const isRepo = n.kind === 'dir' && n.id === t.top
       const glyph = plain ? (n.kind === 'dir' ? '■' : '·') : fileIcon(n, r.open, isRepo)
-      return (
-        <Box key={`${keyFor(n.id)}r`} flexDirection="row">
-          <Text>{'  '.repeat(r.depth)}</Text>
-          {n.id === t.selected ? (
-            <Text color={TONES.cyan?.solid}>{'● '}</Text>
-          ) : (
-            <Button key={`${keyFor(n.id)}c`} plain dimColor label={caret} onPress={() => void press($, n)} />
-          )}
-          <Text color={isFlash ? shimmerColor(-1, phase, name.length, isDim, tone) : iconColor}>{glyph + ' '}</Text>
-          {isFlash ? (
-            shimmerText(name, tone, isDim, isBright)
-          ) : (
-            <Button
-              key={keyFor(n.id)}
-              plain
-              dimColor={isIgnored || n.hidden}
-              label={name}
-              hover={{ color: nameColor }}
-              onPress={() => void press($, n)}
-            />
-          )}
-          <Box flexGrow={1} />
-          {meta && <Text color={theme.muted}>{` ${meta}`}</Text>}
-          {loc && loc[0] > 0 && <Text color={ADD_COLOR}>{` +${loc[0]}`}</Text>}
-          {loc && loc[1] > 0 && <Text color={DEL_COLOR}>{` -${loc[1]}`}</Text>}
-          <Text bold color={status ? gitColor : theme.muted}>
-            {badge}
-          </Text>
-        </Box>
-      )
+      const left: Seg[] = [
+        { t: '  '.repeat(r.depth) },
+        { t: caret, c: theme.muted },
+        { t: glyph + ' ', c: isBright || isDim ? shimmerColor(-1, phase, name.length, isDim, tone) : iconColor },
+      ]
+      if (isBright || isDim) for (const [i, ch] of [...name].entries()) left.push({ t: ch, c: shimmerColor(i, phase, name.length, isDim, tone), b: isBright })
+      else left.push({ t: name, c: nameColor, b: n.id === t.selected, s: status === 'D' && n.kind !== 'dir' })
+      const right: Seg[] = []
+      if (meta) right.push({ t: ` ${meta}`, c: theme.muted })
+      if (loc && loc[0] > 0) right.push({ t: ` +${loc[0]}`, c: ADD_COLOR })
+      if (loc && loc[1] > 0) right.push({ t: ` -${loc[1]}`, c: DEL_COLOR })
+      right.push({ t: badge, c: status ? gitColor : theme.muted, b: true })
+      return { id: n.id, left, right }
     }
+
+    const note = (text: string): RowSpec => ({ id: '', left: [{ t: text, c: theme.muted }], right: [] })
+    const specs: RowSpec[] = [
+      ...(rows.length === 0 ? [note('empty')] : []),
+      ...pinned.map(rowSpec),
+      ...(pinned.length > 0 ? [note('  ⋮')] : []),
+      ...(from > 0 && pinned.length === 0 ? [note(`… ${from} above`)] : []),
+      ...shown.map(rowSpec),
+      ...(from + shown.length < rows.length ? [note(`… ${rows.length - from - shown.length} below`)] : []),
+    ]
 
     const branchRow = () => {
       if (!t.top || !t.branch) return null
@@ -863,12 +881,11 @@ export const register: Register = on => {
           onInput={(v: string) => void patch($, () => ({ query: v }))}
           onSubmit={(v: string) => void patch($, () => ({ query: v }))}
         />
-        {rows.length === 0 && <Text color={theme.muted}>empty</Text>}
-        {pinned.map(renderRow)}
-        {pinned.length > 0 && <Text color={theme.muted}>  ⋮</Text>}
-        {from > 0 && pinned.length === 0 && <Text color={theme.muted}>… {from} above</Text>}
-        {shown.map(renderRow)}
-        {from + shown.length < rows.length && <Text color={theme.muted}>… {rows.length - from - shown.length} below</Text>}
+        <Client
+          key="rows"
+          module="./rows.tsx"
+          props={{ rows: specs, active: t.cursor, activeBg: theme.selection, hoverBg: lighten(theme.selection) } satisfies RowsProps}
+        />
         {t.selected && (
           <Text color="cyan" wrap="truncate-start">
             ● {t.selected.startsWith(t.root + '/') ? t.selected.slice(t.root.length + 1) : shortPath(t.selected)} goes with your next prompts
