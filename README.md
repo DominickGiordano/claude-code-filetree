@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Claude_Code-%E2%89%A5_2.1.287-D97757?logo=claude&logoColor=fff" alt="Claude Code 2.1.287 or newer">
-  <img src="https://img.shields.io/badge/version-0.2.13-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.2.14-blue" alt="Version">
   <img src="https://img.shields.io/badge/type-mod-6f42c1" alt="Claude Code mod">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
@@ -18,7 +18,7 @@
 > [!NOTE]
 > filetree is a Claude Code **mod**: a plugin of function hooks with its own pane. Mods need **Claude Code 2.1.287 or newer**.
 >
-> The pane docks on the right, full height and resizable, only in Claude Code's **fullscreen** layout with a terminal at least 110 columns wide. Turn it on with `/tui fullscreen` (or `"tui": "fullscreen"` in `~/.claude/settings.json`). In the default layout, and under tmux unless fullscreen is on, the pane sits above the prompt instead. This works the same in any terminal; tested in Ghostty, Alacritty and foot.
+> filetree lives in the sidebar on the right, full height and resizable. That needs Claude Code's **fullscreen** layout (`/tui fullscreen`, or `"tui": "fullscreen"` in `~/.claude/settings.json`) and a terminal at least 110 columns wide; tmux keeps Claude Code out of fullscreen unless you turn it on. In the default layout filetree stays hidden instead of sitting above the prompt, and `/filetree` tells you how to switch. Works the same in any terminal; tested in Ghostty, Alacritty and foot.
 >
 > Tested by hand in the terminal on Linux. macOS, the Code tab of the Claude Desktop app and Windows are covered by `claude plugin test` (see `tests/`) in CI. Mods do not load in WSL sessions of the Desktop app.
 

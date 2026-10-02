@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 type World = { os: 'darwin' | 'linux' | 'win32'; env: Record<string, string>; cwd: string; top: string; dirs: Record<string, [string, 'file' | 'dir'][]>; status: string; numstat: string }
 type Ran = string[][]
+const opens: unknown[] = []
 
 function world(on: any, w: World, ran: Ran) {
   mock.env(on, w.env)
@@ -11,7 +12,10 @@ function world(on: any, w: World, ran: Ran) {
   on('session.cwd', () => ({ value: w.cwd }))
   on('session.id', () => ({ value: 'test-session' }))
   on('command.register', () => ({ value: undefined }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', (_$: any, e: any) => {
+    opens.push(e)
+    return { value: { isPlaced: true } }
+  })
   on('ui.toast', (_$: any, e: any) => {
     ran.push(['toast', String(e.text ?? e.message ?? JSON.stringify(e))])
     return { value: undefined }
@@ -303,5 +307,27 @@ test('watches only git metadata, copies paths, clears search, Home and End', { t
   await $.classic.FileChanged({ file_path: `${root}/.git/index`, event: 'change' } as any)
   await clock.advance(400)
   expect(ran.filter(a => a.includes('status')).length).toBeGreaterThan(before)
+  await ui.unmount()
+})
+
+test('sidebar only: no pane in the default layout, and an inline pane closes itself', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  const opened = opens
+  const closed: unknown[] = []
+  on('ui.close', (_$: any, e: any) => {
+    closed.push(e)
+    return {}
+  })
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const before = opened.length
+  const r = await $.command.run({ command: 'filetree', args: '', origin: { kind: 'person' }, presentation: { isFullscreen: false, columns: 200 } } as any)
+  expect(JSON.stringify(r)).toContain('/tui fullscreen')
+  expect(opened.length).toBe(before)
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: { ...paneProps(60), placement: 'inline' } })
+  await clock.settle()
+  expect(closed.length).toBeGreaterThan(0)
   await ui.unmount()
 })

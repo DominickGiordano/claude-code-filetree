@@ -75,6 +75,7 @@ let activityId = 0
 let pointer = true
 let view = { from: 0, max: 0 }
 let lastSync = 0
+let noDock = false
 let home = ''
 let platform: Promise<'linux' | 'darwin' | 'win32'> | null = null
 let dirty: { root: string; files: Record<string, Change> } = { root: '', files: {} }
@@ -247,7 +248,7 @@ async function reset($: EngineInterface, root: string, focus = false): Promise<v
   await put($, () => ({ ...emptyTree(root), showHidden: keepHidden }))
   const title = `Files: ${root.split('/').pop() || root}`
   if (focus) await $.ui.open({ id: PANE, title, focus: true })
-  else await $.ui.open({ id: PANE, title })
+  else if (!noDock) await $.ui.open({ id: PANE, title })
   await loadDirs($, [root])
   await detectRepo($)
   await refreshGit($)
@@ -772,12 +773,15 @@ export const register: Register = (on, options) => {
       await setActivities($, cur => cur.map(a => (a.state === 'running' ? { ...a, state: 'failed', label: `${a.kind} interrupted` } : a)))
       const cwd = await cwdOf($)
       if (!t.root || t.nodes.length === 0 || (follow && t.root !== cwd)) await reset($, cwd)
-      else await $.ui.open({ id: PANE, title: `Files: ${t.root.split('/').pop() || t.root}` })
+      else if (!noDock) await $.ui.open({ id: PANE, title: `Files: ${t.root.split('/').pop() || t.root}` })
     })()
     return next(e)
   })
 
   on('command.run', { command: 'filetree' }, async ($, e) => {
+    if (!e.presentation.isFullscreen) return { text: 'filetree shows in the sidebar, which needs the fullscreen layout. Run /tui fullscreen, then /filetree.' }
+    if (e.presentation.columns < 110) return { text: 'filetree shows in the sidebar, which needs a terminal at least 110 columns wide. Widen it, then run /filetree.' }
+    noDock = false
     const arg = (e.args ?? '').trim()
     const cwd = await cwdOf($)
     follow = !arg
@@ -935,6 +939,12 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (e.surface !== 'terminal' && e.surface !== 'desktop') return next(e)
+    if (e.surface === 'terminal' && e.props.placement === 'inline') {
+      noDock = true
+      void $.ui.close({ id: PANE }).catch(() => undefined)
+      const { Box: Empty } = $.ui.resolve(e)
+      return <Empty />
+    }
     const unicode = glyphSetting === 'plain' || (glyphSetting === 'auto' && (noNerd || e.surface === 'desktop'))
     const { Box, Text, Button, Input, Client } = $.ui.resolve(e)
     const t = await get($)
@@ -948,7 +958,7 @@ export const register: Register = (on, options) => {
     const untracked = new Set(t.untrackedDirs)
     const width = Math.max(24, e.props.bodyColumns)
     const rows = visibleRows(t)
-    const fixed = 2 + (t.top ? (t.branch ? 1 : 0) : 1) + (t.selected || latest ? 1 : 0) + (e.props.placement === 'inline' ? 1 : 0)
+    const fixed = 2 + (t.top ? (t.branch ? 1 : 0) : 1) + (t.selected || latest ? 1 : 0)
     const room = Math.max(5, (e.props.scroll?.bodyRows ?? 40) - fixed)
     const isLit = (id: string) => bright.has(id) || dimmed.has(id)
     const focus = t.flashOn ? ([...t.flash].reverse().find(id => id !== BRANCH_ROW) ?? t.cursor) : t.cursor
@@ -1161,11 +1171,6 @@ export const register: Register = (on, options) => {
           </Box>
           {t.query ? <Button key="clear" plain dimColor label={unicode ? '×' : '\u{f0156}'} onPress={() => void search($, '')} /> : null}
         </Box>
-        {e.props.placement === 'inline' && (
-          <Text dimColor wrap="truncate-end">
-            {e.viewport?.isFullscreen === false ? 'Run /tui fullscreen to dock this pane on the right and resize it' : 'Widen the terminal to 110 columns to dock this pane on the right'}
-          </Text>
-        )}
         <Client
           key="rows"
           module="./rows.tsx"
