@@ -739,6 +739,15 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  on('classic.CwdChanged', async ($, e, next) => {
+    const result = await next(e)
+    if (follow) {
+      const cwd = posix(e.new_cwd)
+      if ((await get($)).root !== cwd) await reset($, cwd)
+    }
+    return result
+  })
+
   on('command.run', { command: 'filetree' }, async ($, e) => {
     const arg = (e.args ?? '').trim()
     const cwd = await cwdOf($)
