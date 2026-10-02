@@ -788,21 +788,31 @@ export const register: Register = (on, options) => {
       const tone = t.flashTones[BRANCH_ROW] ?? 'teal'
       const label = b.head
       return (
-        <Box flexDirection="row">
-          <Text color={isFlash ? (TONES[tone]?.solid ?? theme.accent) : theme.accent}>{(unicode ? BRANCH_ICON.plain : BRANCH_ICON.nerd) + ' '}</Text>
-          <Text bold color={isFlash ? (TONES[tone]?.solid ?? theme.fg) : theme.fg}>
-            {label}
-          </Text>
-          {b.ahead > 0 && <Text color={TONES.teal?.solid}>{` ↑${b.ahead}`}</Text>}
-          {b.behind > 0 && <Text color={TONES.blue?.solid}>{` ↓${b.behind}`}</Text>}
-          {b.upstream && <Text color={theme.muted}>{` ${b.upstream}`}</Text>}
+        <Box flexDirection="row" height={1} overflow="hidden">
+          <Box flexDirection="row" flexShrink={0}>
+            <Text color={isFlash ? (TONES[tone]?.solid ?? theme.accent) : theme.accent}>{(unicode ? BRANCH_ICON.plain : BRANCH_ICON.nerd) + ' '}</Text>
+            <Text bold color={isFlash ? (TONES[tone]?.solid ?? theme.fg) : theme.fg}>
+              {label}
+            </Text>
+            {b.ahead > 0 && <Text color={TONES.teal?.solid}>{` ↑${b.ahead}`}</Text>}
+            {b.behind > 0 && <Text color={TONES.blue?.solid}>{` ↓${b.behind}`}</Text>}
+          </Box>
+          {b.upstream && (
+            <Box flexShrink={1} overflow="hidden">
+              <Text color={theme.muted} wrap="truncate-end">
+                {` ${b.upstream}`}
+              </Text>
+            </Box>
+          )}
           <Box flexGrow={1} />
-          {totals[0] > 0 && <Text color={ADD_COLOR}>{` +${totals[0]}`}</Text>}
-          {totals[1] > 0 && <Text color={DEL_COLOR}>{` -${totals[1]}`}</Text>}
-          {rootCounts.map(c => (
-            <Text color={c.c}>{c.t}</Text>
-          ))}
-          {rootCounts.length === 0 && totals[0] === 0 && totals[1] === 0 && <Text color={theme.muted}> clean</Text>}
+          <Box flexDirection="row" flexShrink={0}>
+            {totals[0] > 0 && <Text color={ADD_COLOR}>{` +${totals[0]}`}</Text>}
+            {totals[1] > 0 && <Text color={DEL_COLOR}>{` -${totals[1]}`}</Text>}
+            {rootCounts.map(c => (
+              <Text color={c.c}>{c.t}</Text>
+            ))}
+            {rootCounts.length === 0 && totals[0] === 0 && totals[1] === 0 && <Text color={theme.muted}> clean</Text>}
+          </Box>
         </Box>
       )
     }
@@ -847,7 +857,7 @@ export const register: Register = (on, options) => {
               key="cwd"
               plain
               dimColor={!follow}
-              label={unicode ? '⌖' : '\u{f01a4}'}
+              label={unicode ? '⌂' : '\u{f02dc}'}
               onPress={() =>
                 void (async () => {
                   follow = true
@@ -878,7 +888,7 @@ export const register: Register = (on, options) => {
             />
             <Button key="collapse" plain dimColor label={unicode ? '⊟' : '\u{eac5}'} onPress={() => void patch($, () => ({ expanded: [] }))} />
             {t.selected && (
-              <Button key="unselect" plain label={unicode ? '✕' : '\u{f0156}'} onPress={() => void patch($, () => ({ selected: '' }))} />
+              <Button key="unselect" plain label={unicode ? '⊘' : '\u{f0777}'} onPress={() => void patch($, () => ({ selected: '' }))} />
             )}
             <Text> </Text>
           </Box>

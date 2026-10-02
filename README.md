@@ -45,23 +45,18 @@ Or inside a Claude Code session:
 - Visual indicator of Claude reads and searches (purple), writes (orange) and commits (green); collapsed folders open to show the file
 - Git and GitHub operations via `git` and `gh` (commit, push, pull, checkout, merge, PR and more) shown as a status at the bottom of the pane
 - Selection-aware: the selected file is passed to Claude as context through a `prompt.submit` hook, and `@path` mentions in a prompt reveal that file in the tree
-- Click to select, double-click to open a file, arrow keys to move through the tree
+- Double-click a file to open it in its default app
+- Click to select, arrow keys to move through the tree
 - Light on large repos: no git calls outside a repo, and every git call is scoped to the cwd
 - Nerd Font icons with a plain Unicode fallback
 
 ### Resizing the pane
 
-You can resize the pane with custom keybindings like the following. This is not part of the mod, but something you have to configure in `keybindings.json`:
+You can resize the pane with the mouse, or by setting custom `pane:grow` or `pane:shrink` keybindings in `keybindings.json`
 
-```json
-{
-  "context": "Global",
-  "bindings": {
-    "ctrl+shift+left": "pane:grow",
-    "ctrl+shift+right": "pane:shrink"
-  }
-}
-```
+<p align="center">
+  <img src="media/filetree-resize.gif" alt="Dragging the filetree pane edge to resize it" width="900">
+</p>
 
 ## Settings
 
