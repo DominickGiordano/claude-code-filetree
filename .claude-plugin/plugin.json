@@ -1,0 +1,1 @@
+{ "name": "filetree", "version": "0.1.0", "description": "FileBlade-style file tree of the session cwd with git status, lines changed and a live view of Claude's file and git activity", "types": "./types/index.d.ts" }
