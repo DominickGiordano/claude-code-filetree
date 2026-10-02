@@ -13,6 +13,7 @@ import {
   parseGit,
   parseNumstat,
   parseTheme,
+  rollCounts,
   replaceChildren,
   rollUp,
   stamp,
@@ -32,10 +33,7 @@ const FLASH_TICKS = 30
 const FLASH_MS = 90
 const DOUBLE_MS = 450
 const FIND_LIMIT = 200
-const UNTRACKED_COUNT_LIMIT = 100
-const UNTRACKED_MAX_BYTES = 512 * 1024
 const ACTIVITY_TTL_MS = 45_000
-const UNTRACKED_DIRS_LIMIT = 10
 const ADD_COLOR = '#98c379'
 const DEL_COLOR = '#e06c75'
 const THEME_FILE = '.local/state/omarchy/current/theme/colors.toml'
@@ -146,18 +144,6 @@ async function detectRepo($: EngineInterface): Promise<void> {
   await patch($, cur => (cur.root === t.root ? { top } : {}))
 }
 
-async function countLines($: EngineInterface, path: string): Promise<number> {
-  try {
-    const st = await $.fs.stat(path)
-    if (st.kind !== 'file' || st.size > UNTRACKED_MAX_BYTES) return 0
-    const text = String(await $.fs.read(path))
-    if (text.includes('\0')) return 0
-    return text.length === 0 ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0)
-  } catch {
-    return 0
-  }
-}
-
 async function readGit($: EngineInterface): Promise<void> {
   const t = await get($)
   if (!t.root || !t.top) return
@@ -176,15 +162,12 @@ async function readGit($: EngineInterface): Promise<void> {
       const work = await git($, root, ['diff', '--numstat', '-z', '--', '.'])
       if (work.exitCode === 0) parseNumstat(work.stdout, top, diff)
     }
-    const untrackedFiles = [...parsed.untrackedFiles]
-    for (const dir of parsed.untrackedDirs.slice(0, UNTRACKED_DIRS_LIMIT)) {
-      if (untrackedFiles.length >= UNTRACKED_COUNT_LIMIT) break
-      const others = await git($, root, ['ls-files', '-o', '--exclude-standard', '-z', '--', dir], 5_000)
-      if (others.exitCode !== 0) continue
-      for (const rel of others.stdout.split('\0').filter(Boolean).slice(0, UNTRACKED_COUNT_LIMIT - untrackedFiles.length)) untrackedFiles.push(join(root, rel))
+    const files = { ...parsed.files }
+    if (parsed.untrackedDirs.length) {
+      const others = await git($, root, ['ls-files', '-o', '--exclude-standard', '-z', '--', ...parsed.untrackedDirs.map(d => d.slice(root.length + 1) || '.')])
+      if (others.exitCode === 0) for (const rel of others.stdout.split('\0').filter(Boolean)) files[join(root, rel)] = 'new'
     }
-    const counted = await Promise.all(untrackedFiles.slice(0, UNTRACKED_COUNT_LIMIT).map(async p => [p, await countLines($, p)] as const))
-    for (const [p, n] of counted) if (n > 0) diff[p] = [n, 0]
+    for (const path of Object.keys(diff)) if (files[path] === 'new') delete diff[path]
     await patch($, cur =>
       cur.root === root
         ? {
@@ -192,7 +175,7 @@ async function readGit($: EngineInterface): Promise<void> {
             ignored: parsed.ignored,
             untrackedDirs: parsed.untrackedDirs,
             branch: parsed.branch,
-            changed: parsed.changed,
+            counts: rollCounts(files, root),
             diff: rollUp(diff, root),
           }
         : {},
@@ -680,7 +663,8 @@ export const register: Register = on => {
     const phase = t.flashOn ? ((await $.state.get(PHASE)).value ?? 0) : 0
     const busy = (await $.state.get(BUSY)).value ?? 0
     const now = await $.clock.now()
-    const recent = (await activities($)).filter(a => a.state === 'running' || now - a.at < ACTIVITY_TTL_MS).slice(-3).reverse()
+    const live = (await activities($)).filter(a => a.state === 'running' || now - a.at < ACTIVITY_TTL_MS)
+    const latest = [...live].reverse().find(a => a.state === 'running') ?? live[live.length - 1]
     const bright = new Set(t.flashOn ? t.flash : [])
     const dimmed = new Set(t.flashOn ? t.flashDim : [])
     const ignored = new Set(t.ignored)
@@ -703,7 +687,15 @@ export const register: Register = on => {
     }
     const shown = rows.slice(from, from + room - pinned.length)
     const totals: [number, number] = t.top ? (t.diff[t.root] ?? [0, 0]) : [0, 0]
-    const changedFiles = t.top ? t.changed : 0
+    const countSegs = (c: [number, number, number] | undefined): Seg[] => {
+      if (!c) return []
+      const out: Seg[] = []
+      if (c[0] > 0) out.push({ t: ` ?:${c[0]}`, c: GIT_COLOR['?'] ?? ADD_COLOR })
+      if (c[1] > 0) out.push({ t: ` M:${c[1]}`, c: GIT_COLOR.M ?? '#e5c07b' })
+      if (c[2] > 0) out.push({ t: ` D:${c[2]}`, c: theme.urgent })
+      return out
+    }
+    const rootCounts = t.top ? countSegs(t.counts[t.root]) : []
     const header = t.top ? `${t.top.split('/').pop() ?? t.top}${t.root.slice(t.top.length)}` : t.root.split('/').pop() || t.root
 
     const shimmerText = (text: string, tone: string, dim: boolean, bold: boolean) => (
@@ -728,8 +720,10 @@ export const register: Register = on => {
       const loc = t.diff[n.id]
       const meta = loc ? '' : n.kind === 'file' ? stamp(n.mtime) : ''
       const locText = loc ? `${loc[0] ? ` +${loc[0]}` : ''}${loc[1] ? ` -${loc[1]}` : ''}` : ''
-      const badge = status ? ` ${status}` : isIgnored ? (plain ? ' ⊘' : ' \u{f05e}') : '  '
-      const cols = Math.max(4, width - r.depth * 2 - 6 - (meta ? meta.length + 1 : 0) - locText.length - badge.length)
+      const dirCounts = n.kind === 'dir' ? countSegs(t.counts[n.id]) : []
+      const badge = dirCounts.length ? '' : status ? ` ${status}` : isIgnored ? (plain ? ' ⊘' : ' \u{f05e}') : '  '
+      const countsText = dirCounts.map(c => c.t).join('')
+      const cols = Math.max(4, width - r.depth * 2 - 6 - (meta ? meta.length + 1 : 0) - locText.length - badge.length - countsText.length)
       const name = n.name.length > cols ? n.name.slice(0, cols - 1) + '…' : n.name
       const caret = n.kind === 'dir' ? (plain ? (r.open ? '▾' : '▸') : r.open ? CHEVRON_OPEN : CHEVRON_CLOSED) + ' ' : '  '
       const isRepo = n.kind === 'dir' && n.id === t.top
@@ -745,7 +739,8 @@ export const register: Register = on => {
       if (meta) right.push({ t: ` ${meta}`, c: theme.muted })
       if (loc && loc[0] > 0) right.push({ t: ` +${loc[0]}`, c: ADD_COLOR })
       if (loc && loc[1] > 0) right.push({ t: ` -${loc[1]}`, c: DEL_COLOR })
-      right.push({ t: badge, c: status ? gitColor : theme.muted, b: true })
+      right.push(...dirCounts)
+      if (badge) right.push({ t: badge, c: status ? gitColor : theme.muted, b: true })
       return { id: n.id, left, right }
     }
 
@@ -775,7 +770,10 @@ export const register: Register = on => {
           <Box flexGrow={1} />
           {totals[0] > 0 && <Text color={ADD_COLOR}>{` +${totals[0]}`}</Text>}
           {totals[1] > 0 && <Text color={DEL_COLOR}>{` -${totals[1]}`}</Text>}
-          <Text color={theme.muted}>{changedFiles ? ` ${changedFiles} changed` : ' clean'}</Text>
+          {rootCounts.map(c => (
+            <Text color={c.c}>{c.t}</Text>
+          ))}
+          {rootCounts.length === 0 && totals[0] === 0 && totals[1] === 0 && <Text color={theme.muted}> clean</Text>}
         </Box>
       )
     }
@@ -879,7 +877,7 @@ export const register: Register = on => {
           props={{ rows: JSON.parse(JSON.stringify(specs)) as RowSpec[], active: t.cursor, activeBg: theme.selection, hoverBg: lighten(theme.selection) } satisfies RowsProps}
         />
         <Box flexGrow={1} />
-        {(t.selected || recent.length > 0) && (
+        {(t.selected || latest) && (
           <Box flexDirection="row">
             {t.selected ? (
               <Box flexShrink={1}>
@@ -889,7 +887,7 @@ export const register: Register = on => {
               </Box>
             ) : null}
             <Box flexGrow={1} />
-            {[...recent].reverse().map(chip)}
+            {latest && chip(latest)}
           </Box>
         )}
       </Box>

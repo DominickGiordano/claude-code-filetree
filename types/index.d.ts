@@ -41,7 +41,7 @@ export type FileTree = {
   untrackedDirs: string[]
   top: string
   branch: Branch | null
-  changed: number
+  counts: Record<string, [number, number, number]>
   flash: string[]
   flashDim: string[]
   flashOn: boolean

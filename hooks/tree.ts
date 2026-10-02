@@ -29,7 +29,7 @@ export function emptyTree(root: string): FileTree {
     untrackedDirs: [],
     top: '',
     branch: null,
-    changed: 0,
+    counts: {},
     flash: [],
     flashDim: [],
     flashOn: false,
@@ -88,9 +88,10 @@ export type GitStatus = {
   ignored: string[]
   untrackedDirs: string[]
   branch: Branch | null
-  untrackedFiles: string[]
-  changed: number
+  files: Record<string, Change>
 }
+
+export type Change = 'new' | 'mod' | 'del'
 
 export function parseBranch(record: string): Branch {
   const body = record.replace(/^## /, '')
@@ -106,9 +107,8 @@ export function parseGit(stdout: string, top: string): GitStatus {
   const git: Record<string, string> = {}
   const ignored: string[] = []
   const untrackedDirs: string[] = []
-  const untrackedFiles: string[] = []
+  const files: Record<string, Change> = {}
   let branch: Branch | null = null
-  let changed = 0
   const parts = stdout.split('\0')
   for (let i = 0; i < parts.length; i++) {
     const rec = parts[i] ?? ''
@@ -125,10 +125,8 @@ export function parseGit(stdout: string, top: string): GitStatus {
       ignored.push(path)
       continue
     }
-    if (xy === '??') {
-      if (raw.endsWith('/')) untrackedDirs.push(path)
-      else untrackedFiles.push(path)
-    }
+    if (xy === '??' && raw.endsWith('/')) untrackedDirs.push(path)
+    else files[path] = xy === '??' || (xy.includes('A') && !xy.includes('D')) ? 'new' : xy.includes('D') && !/U/.test(xy) ? 'del' : 'mod'
     const letter =
       xy === '??'
         ? '?'
@@ -136,7 +134,6 @@ export function parseGit(stdout: string, top: string): GitStatus {
           ? 'U'
           : (['D', 'M', 'R', 'C', 'A', 'T'].find(c => xy.includes(c)) ?? '')
     if (!letter) continue
-    changed += 1
     git[path] = stronger(git[path], letter)
     let dir = dirname(path)
     while (dir.length >= top.length && dir !== '/') {
@@ -145,7 +142,7 @@ export function parseGit(stdout: string, top: string): GitStatus {
       dir = dirname(dir)
     }
   }
-  return { git, ignored, untrackedDirs, branch, untrackedFiles, changed }
+  return { git, ignored, untrackedDirs, branch, files }
 }
 
 export function parseNumstat(stdout: string, top: string, into: Record<string, [number, number]>): void {
@@ -177,6 +174,22 @@ export function rollUp(diff: Record<string, [number, number]>, top: string): Rec
       const prev = out[dir] ?? [0, 0]
       out[dir] = [prev[0] + add, prev[1] + del]
       if (dir === top) break
+      dir = dirname(dir)
+    }
+  }
+  return out
+}
+
+export function rollCounts(files: Record<string, Change>, root: string): Record<string, [number, number, number]> {
+  const out: Record<string, [number, number, number]> = {}
+  const slot = { new: 0, mod: 1, del: 2 } as const
+  for (const [path, change] of Object.entries(files)) {
+    let dir = dirname(path)
+    while (dir.length >= root.length && dir !== '/') {
+      const cur = out[dir] ?? [0, 0, 0]
+      cur[slot[change]] += 1
+      out[dir] = cur
+      if (dir === root) break
       dir = dirname(dir)
     }
   }
