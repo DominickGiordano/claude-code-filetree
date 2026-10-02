@@ -82,6 +82,16 @@ Both settings are in `/config` under filetree.
 
 Clicking rows needs herdr 0.9.1 or later. herdr 0.9.0 and older accept pixel mouse reporting but still send cell positions, which would put every click in the session in the wrong place, so on those versions the rows ignore the mouse and the rest of the pane and session keep working. Run `herdr update` to get row clicks.
 
+## Contributing
+
+Turn on the pre-commit hook once per clone; it runs `claude plugin validate` and the plugin tests before each commit that touches the plugin:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The same checks run on macOS, Windows and Linux in CI on every push.
+
 ## License
 
 [MIT](LICENSE)

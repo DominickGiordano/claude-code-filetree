@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+CLAUDE=claude
+[ -x "$HOME/.local/bin/claude" ] && CLAUDE="$HOME/.local/bin/claude"
+git diff --cached --quiet -- hooks tests .claude-plugin && exit 0
+"$CLAUDE" plugin validate . >/dev/null || { "$CLAUDE" plugin validate .; exit 1; }
+out=$("$CLAUDE" plugin test . 2>&1) || { printf '%s\n' "$out"; exit 1; }
+printf '%s\n' "$out" | tail -2
