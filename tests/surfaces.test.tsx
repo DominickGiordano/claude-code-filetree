@@ -264,3 +264,44 @@ test('long trees scroll: wheel, scrollbar drag, and a click does not jump the vi
   expect(p.active).toBe(p.rows[5].id)
   await ui.unmount()
 })
+
+test('watches only git metadata, copies paths, clears search, Home and End', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: root, dirs: { [root]: [['.git', 'dir'], ['a.txt', 'file'], ['b.txt', 'file'], ['c.txt', 'file']], [`${root}/.git`]: [['index', 'file'], ['HEAD', 'file']] }, status: '## main\0', numstat: '' }, ran)
+  const copied: string[] = []
+  on('ui.copy', (_$: any, e: any) => {
+    copied.push(e.text)
+    return { value: true }
+  })
+  on('classic.SessionStart', () => ({}))
+  on('classic.FileChanged', () => ({}))
+  const started = await $.classic.SessionStart({ source: 'startup', cwd: root } as any)
+  expect((started as any).watchPaths).toEqual([`${root}/.git/index`, `${root}/.git/HEAD`])
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  await ui.post({ copy: `${root}/b.txt` }, { in: 'rows' })
+  await ui.post({ copy: `${root}/b.txt`, shift: true }, { in: 'rows' })
+  await clock.settle()
+  expect(copied).toEqual(['b.txt', `${root}/b.txt`])
+  await ui.input({ key: 'q', text: 'b', kind: 'change' })
+  await clock.settle()
+  expect(await ui.find({ key: 'clear' })).toBeDefined()
+  await ui.press({ key: 'clear' })
+  await clock.settle()
+  expect(await ui.find({ key: 'clear' })).toBeUndefined()
+  await ui.post({ key: 'end' }, { in: 'rows' })
+  await clock.settle()
+  const rowsOf = async () => ((await ui.drawn()) as any).children.find((c: any) => c.type === 'Client').props.props
+  expect((await rowsOf()).active).toBe(`${root}/c.txt`)
+  await ui.post({ key: 'home' }, { in: 'rows' })
+  await clock.settle()
+  expect((await rowsOf()).active).toBe(`${root}/.git`)
+  const before = ran.filter(a => a.includes('status')).length
+  await $.classic.FileChanged({ file_path: `${root}/.git/index`, event: 'change' } as any)
+  await clock.advance(400)
+  expect(ran.filter(a => a.includes('status')).length).toBeGreaterThan(before)
+  await ui.unmount()
+})

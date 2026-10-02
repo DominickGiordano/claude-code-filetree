@@ -64,6 +64,10 @@ const Rows: ClientModule<RowsProps, Local> = (props, surface) => {
     }
     if (e.type === 'move' && !e.button && cur.hover !== e.y) surface.setState({ ...cur, hover: e.y })
     const row = props.rows[e.y]
+    if (e.type === 'down' && e.button === 'right' && row?.id) {
+      surface.post({ copy: row.id, shift: Boolean(e.shift) })
+      return
+    }
     if (e.type !== 'down' || (e.button ?? 'left') !== 'left' || !row) return
     let x = 0
     for (const seg of row.left) {

@@ -74,6 +74,7 @@ let searchIndex: { root: string; paths: Promise<string[]> } | null = null
 let activityId = 0
 let pointer = true
 let view = { from: 0, max: 0 }
+let lastSync = 0
 let home = ''
 let platform: Promise<'linux' | 'darwin' | 'win32'> | null = null
 let dirty: { root: string; files: Record<string, Change> } = { root: '', files: {} }
@@ -455,6 +456,42 @@ async function gitPaths($: EngineInterface, root: string, prefix: string, commit
   }
 }
 
+async function gitDir($: EngineInterface, cwd: string): Promise<string> {
+  for (let dir = cwd, i = 0; i < 64; i++) {
+    try {
+      const dot = join(dir, '.git')
+      const st = await $.fs.stat(dot)
+      if (st.kind === 'dir') return dot
+      const ref = /^gitdir:\s*(.+)$/m.exec(String(await $.fs.read(dot)))?.[1]?.trim()
+      if (ref) return resolve(dir, ref, home)
+    } catch {
+      const up = dirname(dir)
+      if (up === dir) return ''
+      dir = up
+      continue
+    }
+    return ''
+  }
+  return ''
+}
+
+async function sync($: EngineInterface, force = false): Promise<void> {
+  const now = await $.clock.now()
+  if (!force && now - lastSync < 2_000) return
+  lastSync = now
+  const t = await get($)
+  if (!t.root) return
+  await loadDirs($, [t.root, ...openDirs(t)])
+  if (t.top) await refreshGit($)
+}
+
+async function copyPath($: EngineInterface, id: string, absolute: boolean, surface?: string): Promise<void> {
+  const t = await get($)
+  const text = !absolute && id !== t.root && inside(t.root, id) ? id.slice(t.root.endsWith('/') ? t.root.length : t.root.length + 1) : id
+  const done = await $.ui.copy({ text, ...(surface ? { surface: surface as 'terminal' } : {}) })
+  $.ui.toast(done ? `Copied ${text}` : 'Could not copy the path')
+}
+
 async function exists($: EngineInterface, path: string): Promise<boolean> {
   try {
     await $.fs.stat(path)
@@ -801,8 +838,12 @@ export const register: Register = (on, options) => {
 
   on('ui.message', async ($, e, next) => {
     if (e.requestId !== PANE || e.element !== 'rows' || !e.data || typeof e.data !== 'object') return next(e)
-    const data = e.data as { press?: unknown; key?: unknown; ctrl?: unknown; shift?: unknown; scrollTo?: unknown }
+    const data = e.data as { press?: unknown; key?: unknown; ctrl?: unknown; shift?: unknown; scrollTo?: unknown; copy?: unknown }
     const t = await get($)
+    if (typeof data.copy === 'string') {
+      await copyPath($, data.copy, Boolean(data.shift), e.surface)
+      return {}
+    }
     if (typeof data.scrollTo === 'number') {
       const to = Math.round(Math.max(0, Math.min(1, data.scrollTo)) * view.max)
       if (to !== t.scroll) await patch($, () => ({ scroll: to }))
@@ -828,6 +869,9 @@ export const register: Register = (on, options) => {
     else if (data.key === 'down' || data.key === 'j') await move(1)
     else if (data.key === 'pageup') await move(-10)
     else if (data.key === 'pagedown') await move(10)
+    else if (data.key === 'home') await move(-rows.length)
+    else if (data.key === 'end') await move(rows.length)
+    else if (cur && (data.key === 'y' || data.key === 'Y')) await copyPath($, cur.id, data.key === 'Y' || Boolean(data.shift), e.surface)
     else if (cur && (data.key === 'right' || data.key === 'l') && cur.kind === 'dir' && !t.expanded.includes(cur.id)) await toggle($, cur)
     else if (cur && (data.key === 'left' || data.key === 'h')) {
       if (cur.kind === 'dir' && t.expanded.includes(cur.id)) await toggle($, cur)
@@ -835,6 +879,24 @@ export const register: Register = (on, options) => {
     } else if (cur && data.key === 'return') await (cur.kind !== 'dir' ? openNode($, cur) : toggle($, cur))
     else if (cur && data.key === ' ') await toggle($, cur)
     return {}
+  })
+
+  on('classic.SessionStart', async ($, e, next) => {
+    const result = await next(e)
+    const gd = await gitDir($, posix(e.cwd))
+    return gd ? { ...result, watchPaths: [...(result.watchPaths ?? []), join(gd, 'index'), join(gd, 'HEAD')] } : result
+  })
+
+  on('classic.FileChanged', async ($, e, next) => {
+    const result = await next(e)
+    if (/[\\/]\.git[\\/]|[\\/](index|HEAD)$/.test(e.file_path)) $.clock.after(300, () => void sync($, true))
+    return result
+  })
+
+  on('ui.focus', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    const result = await next(e)
+    void sync($)
+    return result
   })
 
   on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -845,6 +907,7 @@ export const register: Register = (on, options) => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    void sync($)
     const t = await get($)
     const context = [...(e.context ?? [])]
     if (t.selected && (await exists($, t.selected))) context.push(`The user has this file selected in the file tree; "this" or "it" in the prompt likely refers to it: ${t.selected}`)
@@ -1083,16 +1146,21 @@ export const register: Register = (on, options) => {
         </Box>
         {branchRow()}
         {!t.top && <Text color={theme.muted}>{unicode ? '± ' : '\u{e702} '}no git repo · git status starts after git init</Text>}
-        <Input
-          key="q"
-          label="/ "
-          placeholder="search"
-          submitLabel="jump"
-          autoFocus
-          value={t.query}
-          onInput={(v: string) => void search($, v)}
-          onSubmit={(v: string) => void jump($, v)}
-        />
+        <Box flexDirection="row">
+          <Box flexGrow={1}>
+            <Input
+              key="q"
+              label="/ "
+              placeholder="search"
+              submitLabel="jump"
+              autoFocus
+              value={t.query}
+              onInput={(v: string) => void search($, v)}
+              onSubmit={(v: string) => void jump($, v)}
+            />
+          </Box>
+          {t.query ? <Button key="clear" plain dimColor label={unicode ? '×' : '\u{f0156}'} onPress={() => void search($, '')} /> : null}
+        </Box>
         <Client
           key="rows"
           module="./rows.tsx"
