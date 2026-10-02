@@ -839,6 +839,7 @@ export const register: Register = (on, options) => {
   on('ui.message', async ($, e, next) => {
     if (e.requestId !== PANE || e.element !== 'rows' || !e.data || typeof e.data !== 'object') return next(e)
     const data = e.data as { press?: unknown; key?: unknown; ctrl?: unknown; shift?: unknown; scrollTo?: unknown; copy?: unknown }
+    void sync($)
     const t = await get($)
     if (typeof data.copy === 'string') {
       await copyPath($, data.copy, Boolean(data.shift), e.surface)
