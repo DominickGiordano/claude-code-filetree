@@ -41,6 +41,12 @@ const ACTIVITY_TTL_MS = 45_000
 const ADD_COLOR = '#98c379'
 const DEL_COLOR = '#e06c75'
 const THEME_FILE = '.local/state/omarchy/current/theme/colors.toml'
+const FONT_SCRIPT =
+  'f=$(fc-list ":charset=$1" file | head -n1 | cut -d: -f1); [ -n "$f" ] || { echo missing; exit 0; }; m=$(date -r "$f" +%s); p=$PPID; ' +
+  'while [ -n "$p" ] && [ "$p" -gt 1 ]; do c=$(ps -o comm= -p "$p" 2>/dev/null | tr -d " "); case "$c" in ' +
+  'ghostty|kitty|alacritty|Alacritty|foot|footclient|wezterm-gui|konsole|gnome-terminal-|xterm|urxvt|st|Terminal|iTerm2) ' +
+  'e=$(ps -o etimes= -p "$p" 2>/dev/null | tr -d " "); [ -n "$e" ] && [ $(( $(date +%s) - e )) -lt "$m" ] && echo stale || echo ok; exit 0;; esac; ' +
+  'p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d " "); done; echo ok'
 const PRUNE = ['.git', 'node_modules', 'target', '.venv', '__pycache__', 'dist', '.next']
 
 let blink: Timer | null = null
@@ -497,6 +503,15 @@ async function search($: EngineInterface, query: string): Promise<void> {
   await revealPaths($, hits)
 }
 
+async function fontState($: EngineInterface, charset: string): Promise<'ok' | 'stale' | 'missing'> {
+  try {
+    const out = (await $.process.run(['sh', '-c', FONT_SCRIPT, 'sh', charset], { timeoutMs: 5_000 })).stdout.trim()
+    return out === 'stale' || out === 'missing' ? out : 'ok'
+  } catch {
+    return 'missing'
+  }
+}
+
 async function launch($: EngineInterface, argv: string[]): Promise<void> {
   try {
     await $.process.run(['setsid', '-f', ...argv], { timeoutMs: 10_000 })
@@ -545,8 +560,8 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'filetree', description: 'Show the file tree; args: [path] (no path follows the cwd)' })
     void (async () => {
       try {
-        const nerd = await $.process.run(['fc-list', ':charset=f04eb', 'family'], { timeoutMs: 5_000 })
-        noNerd = nerd.stdout.trim().length === 0
+        const remote = Boolean((await $.env.get('SSH_CONNECTION')) || (await $.env.get('SSH_TTY')))
+        noNerd = !remote && (await fontState($, 'f04eb')) !== 'ok'
       } catch {
         noNerd = true
       }

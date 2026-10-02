@@ -14,7 +14,7 @@ Claude Code plugin (2.1.287+): a FileBlade-style file tree of the session cwd, d
 
 `Claude activity` (in `/config`, or `pluginConfigs.filetree.options.activity` in settings) picks what shimmers: `reads and writes` (default), `writes` (orange edits and green git actions), `reads` (purple reads and searches) or `none`. Git status, line counts and the footer git status are always shown.
 
-`Glyphs` picks the icon set: `auto` (Nerd Font icons when one is installed, plain Unicode in the desktop app), `nerd` or `plain`.
+`Glyphs` picks the icon set: `auto` (Nerd Font icons when one is installed and the terminal was started after it was installed, plain Unicode in the desktop app, Nerd Font assumed over SSH), `nerd` or `plain`.
 
 ## Install
 
