@@ -557,7 +557,7 @@ export const register: Register = (on, options) => {
   showReads = activity.includes('reads')
   showWrites = activity.includes('writes')
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'filetree', description: 'Show the file tree; args: [path] (no path follows the cwd)' })
+    await $.command.register({ name: 'filetree', description: 'Show the file tree; args: [path] (no path = cwd)' })
     void (async () => {
       try {
         const remote = Boolean((await $.env.get('SSH_CONNECTION')) || (await $.env.get('SSH_TTY')))
