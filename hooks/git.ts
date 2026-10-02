@@ -1,4 +1,4 @@
-import { isAbsolute, posix } from './tree'
+import { drivesOn, isAbsolute, posix } from './tree'
 
 export type GitAction = {
   kind: string
@@ -98,6 +98,8 @@ function segments(command: string): string[][] {
     } else if (ch === '\\' && i + 1 < command.length) {
       tok += command[++i]
       has = true
+    } else if (ch === '#' && !has) {
+      while (i + 1 < command.length && command[i + 1] !== '\n') i++
     } else if (ch === ' ' || ch === '\t') endTok()
     else if (ch === '\n' || ch === ';') endSeg()
     else if (ch === '&' && (command[i - 1] === '>' || command[i + 1] === '>')) {
@@ -112,7 +114,11 @@ function segments(command: string): string[][] {
     }
   }
   endSeg()
-  return out
+  if (!quote) return out
+  return command
+    .split(/&&|\|\||;|\||\n/)
+    .map(s => s.trim().split(/\s+/).filter(Boolean))
+    .filter(s => s.length > 0)
 }
 
 function stripGlobals(tokens: string[]): string[] {
@@ -223,7 +229,7 @@ export function readTargets(command: string, sessionCwd: string, stdout: string,
   }
   if (listsPaths) {
     for (const line of stdout.split('\n').slice(0, 400)) {
-      const path = posix(line).match(/^((?:[A-Za-z]:)?[^:\0]+?)(?::\d+[:-]|$|:)/)?.[1]?.trim()
+      const path = posix(line).match(drivesOn() ? /^((?:[A-Za-z]:)?[^:\0]+?)(?::\d+[:-]|$|:)/ : /^([^:\0]+?)(?::\d+[:-]|$|:)/)?.[1]?.trim()
       if (path && !path.includes(' ')) out.add(resolve(cwd, path, home))
     }
   }

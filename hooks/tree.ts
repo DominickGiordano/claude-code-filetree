@@ -65,6 +65,10 @@ export function useDrives(on: boolean): void {
   drives = on
 }
 
+export function drivesOn(): boolean {
+  return drives
+}
+
 export function posix(path: string): string {
   if (!drives) return path
   return path.replace(/\\/g, '/').replace(/^\/([A-Za-z])(\/|$)/, (_, d: string) => `${d.toUpperCase()}:/`)
