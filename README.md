@@ -10,4 +10,15 @@ Claude Code plugin (2.1.287+): a FileBlade-style file tree of the session cwd, d
 - click a name to select or toggle, double-click to open (`gio open`) or to root the tree at a folder; the selected file goes with each prompt as context; `@path` mentions in a prompt reveal that file and move the row highlight onto it
 - header icons: up, follow cwd, refresh, dotfiles, collapse, unselect; FileBlade Nerd Font icons fall back to plain Unicode when no Nerd Font is installed
 
-Load it: `claude --plugin-dir ~/git/filetree`
+## Install
+
+The repo is its own plugin marketplace (`.claude-plugin/marketplace.json`, plugin at the root). It is private for now, so installing needs GitHub access through `gh` or git credentials:
+
+```bash
+claude plugin marketplace add data-goblin/filetree
+claude plugin install filetree@filetree
+```
+
+or inside a session: `/plugin marketplace add data-goblin/filetree`, then `/plugin install filetree@filetree`. Background auto-updates of a private marketplace need `GITHUB_TOKEN` in the environment.
+
+For development, load the checkout directly: `claude --plugin-dir ~/git/filetree`
