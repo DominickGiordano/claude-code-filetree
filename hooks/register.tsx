@@ -569,15 +569,25 @@ function indexPaths($: EngineInterface, t: FileTree): Promise<string[]> {
   return searchIndex.paths
 }
 
-async function search($: EngineInterface, query: string): Promise<void> {
+async function search($: EngineInterface, query: string): Promise<string[]> {
   if (!(await get($)).query.trim()) searchIndex = null
   await patch($, () => ({ query }))
   const q = query.trim().toLowerCase()
-  if (!q) return
+  if (!q) return []
   const t = await get($)
   const hits = (await indexPaths($, t)).filter(p => p.slice(t.root.length + 1).toLowerCase().includes(q)).slice(0, SEARCH_REVEAL_LIMIT)
-  if ((await get($)).query !== query) return
+  if ((await get($)).query !== query) return []
   await revealPaths($, hits)
+  return hits
+}
+
+async function jump($: EngineInterface, query: string): Promise<void> {
+  const hits = (await search($, query)).slice(0, 10)
+  await patch($, cur => {
+    const open = new Set(cur.expanded)
+    for (const p of hits) for (const a of ancestorsOf(p, cur.root)) open.add(a)
+    return { query: '', expanded: [...open], cursor: hits[0] ?? cur.cursor }
+  })
 }
 
 async function fontState($: EngineInterface, charset: string): Promise<'ok' | 'stale' | 'missing'> {
@@ -996,10 +1006,11 @@ export const register: Register = (on, options) => {
           key="q"
           label="/ "
           placeholder="search"
-          submitLabel="filter"
+          submitLabel="jump"
           autoFocus
+          value={t.query}
           onInput={(v: string) => void search($, v)}
-          onSubmit={(v: string) => void search($, v)}
+          onSubmit={(v: string) => void jump($, v)}
         />
         <Client
           key="rows"
