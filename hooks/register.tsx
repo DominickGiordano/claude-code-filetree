@@ -321,7 +321,7 @@ async function followCwd($: EngineInterface): Promise<boolean> {
   return true
 }
 
-type Pending = { actions: GitAction[]; ids: number[]; before: Record<string, string>; ahead: number; marker: string }
+type Pending = { actions: GitAction[]; ids: number[] }
 
 async function startGit($: EngineInterface, actions: GitAction[]): Promise<number[]> {
   const now = await $.clock.now()
@@ -397,6 +397,17 @@ async function finishGit($: EngineInterface, p: Pending, ok: boolean, output: st
   )
 }
 
+async function gitPaths($: EngineInterface, root: string, top: string, committed: boolean): Promise<string[]> {
+  try {
+    const run = committed
+      ? await git($, root, ['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', 'HEAD'], 5_000)
+      : await git($, root, ['diff', '--cached', '--name-only', '-z'], 5_000)
+    return run.exitCode === 0 ? run.stdout.split('\0').filter(Boolean).map(rel => join(top, rel)) : []
+  } catch {
+    return []
+  }
+}
+
 async function afterBash($: EngineInterface, p: Pending | null, marker: string, initRepo: boolean): Promise<void> {
   if (await followCwd($)) return
   const t = await get($)
@@ -450,13 +461,13 @@ async function afterBash($: EngineInterface, p: Pending | null, marker: string, 
     for (const r of found) if (shown.has(r) && !tones[r]) tones[r] = 'purple'
   }
   if (p) {
-    if (p.actions.some(a => a.verb === 'commit' || a.verb === 'add')) {
-      const tone = 'green'
-      for (const [path, letter] of Object.entries(p.before)) {
-        if (final.git[path] === letter) continue
-        if (!present.has(path) || final.nodes.find(n => n.id === path)?.kind === 'dir') continue
-        tones[path] = tone
-      }
+    const committed = p.actions.some(a => a.verb === 'commit')
+    if ((committed || p.actions.some(a => a.verb === 'add')) && final.top) {
+      const paths = await gitPaths($, final.root, final.top, committed)
+      const inside = paths.filter(x => x.startsWith(final.root + '/') && !underAny(x, ignored, final.root)).slice(0, READ_REVEAL_LIMIT)
+      await revealPaths($, inside)
+      const shown = new Set((await get($)).nodes.map(n => n.id))
+      for (const x of inside) if (shown.has(x)) tones[x] = 'green'
     }
     const pushLike = p.actions.find(a => ['push', 'pull', 'fetch', 'checkout', 'switch', 'branch', 'merge', 'rebase', 'tag'].includes(a.verb) || a.kind.startsWith('gh '))
     if (pushLike) tones[BRANCH_ROW] = pushLike.tone
@@ -596,9 +607,7 @@ export const register: Register = on => {
       }
       const actions = gitActions(command)
       if (actions.length) {
-        const t = await get($)
-        const ids = await startGit($, actions)
-        pending = { actions, ids, before: { ...t.git }, ahead: t.branch?.ahead ?? 0, marker }
+        pending = { actions, ids: await startGit($, actions) }
       }
     }
     const result = await next(e)
