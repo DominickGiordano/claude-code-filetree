@@ -34,6 +34,7 @@ const FLASH_MS = 90
 const DOUBLE_MS = 450
 const FIND_LIMIT = 200
 const READ_REVEAL_LIMIT = 12
+const SEARCH_REVEAL_LIMIT = 60
 const ACTIVITY_TTL_MS = 45_000
 const ADD_COLOR = '#98c379'
 const DEL_COLOR = '#e06c75'
@@ -51,6 +52,7 @@ let scanAgain = false
 let gitRun: Promise<void> | null = null
 let gitAgain = false
 let queuedReads: string[] = []
+let searchIndex: { root: string; paths: string[] } | null = null
 let activityId = 0
 
 function shimmerColor(i: number, phase: number, len: number, dim: boolean, tone: string): string {
@@ -520,6 +522,31 @@ async function reveal($: EngineInterface, paths: string[]): Promise<void> {
   })
 }
 
+async function indexPaths($: EngineInterface, t: FileTree): Promise<string[]> {
+  if (searchIndex?.root === t.root) return searchIndex.paths
+  try {
+    const run = t.top
+      ? await git($, t.root, ['ls-files', '-co', '--exclude-standard', '-z'], 10_000)
+      : await $.process.run(['find', t.root, '-xdev', '(', ...PRUNE.flatMap((name, i) => (i === 0 ? ['-name', name] : ['-o', '-name', name])), ')', '-prune', '-o', '-type', 'f', '-print0'], { timeoutMs: 10_000 })
+    const paths = run.stdout.split('\0').filter(Boolean).map(p => (p.startsWith('/') ? p : join(t.root, p)))
+    searchIndex = { root: t.root, paths }
+    return paths
+  } catch {
+    return []
+  }
+}
+
+async function search($: EngineInterface, query: string): Promise<void> {
+  if (!(await get($)).query.trim()) searchIndex = null
+  await patch($, () => ({ query }))
+  const q = query.trim().toLowerCase()
+  if (!q) return
+  const t = await get($)
+  const hits = (await indexPaths($, t)).filter(p => p.slice(t.root.length + 1).toLowerCase().includes(q)).slice(0, SEARCH_REVEAL_LIMIT)
+  if ((await get($)).query !== query) return
+  await revealPaths($, hits)
+}
+
 async function launch($: EngineInterface, argv: string[]): Promise<void> {
   try {
     await $.process.run(['setsid', '-f', ...argv], { timeoutMs: 10_000 })
@@ -913,8 +940,8 @@ export const register: Register = on => {
           placeholder="search"
           submitLabel="filter"
           autoFocus
-          onInput={(v: string) => void patch($, () => ({ query: v }))}
-          onSubmit={(v: string) => void patch($, () => ({ query: v }))}
+          onInput={(v: string) => void search($, v)}
+          onSubmit={(v: string) => void search($, v)}
         />
         <Client
           key="rows"
