@@ -127,6 +127,18 @@ export function resolve(cwd: string, p: string): string {
   return parts.join('/') || '/'
 }
 
+export function readOnly(command: string): boolean {
+  if (/[^>]>[^>&]|>>/.test(` ${command}`)) return false
+  return segments(command).every(raw => {
+    const tokens = stripGlobals(raw)
+    const head = tokens[0]?.split('/').pop() ?? ''
+    if (head === 'cd' || head === 'echo' || head === 'printf' || head === 'true' || head === 'pwd') return true
+    if (head === 'git') return gitActions(tokens.join(' ')).length === 0
+    if (head === 'sed') return !tokens.some(t => /^-i/.test(t))
+    return READERS.has(head)
+  })
+}
+
 export function readTargets(command: string, sessionCwd: string, stdout: string): string[] {
   let cwd = sessionCwd
   const out = new Set<string>()

@@ -17,7 +17,7 @@
     "activity": {
       "type": "string",
       "title": "Claude activity",
-      "description": "Which of Claude's file activity shimmers in the tree: reads and searches in purple, writes and git actions in orange and green",
+      "description": "Which of Claude's file activity shimmers in the tree: files read with the Read tool or Bash readers (rg, grep, find, cat) in purple, writes in orange and git actions in green",
       "default": "reads and writes",
       "options": [
         "reads and writes",

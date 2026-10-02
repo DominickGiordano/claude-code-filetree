@@ -1,7 +1,7 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Activity, FileNode, FileTree, Theme } from '../types'
-import { BRANCH_ICON, type GitAction, gitActions, readTargets, resolve, TONES } from './git'
+import { BRANCH_ICON, type GitAction, gitActions, readOnly, readTargets, resolve, TONES } from './git'
 import type { RowSpec, RowsProps, Seg } from './rows'
 import { CHEVRON_CLOSED, CHEVRON_OPEN, fileIcon, GIT_COLOR } from './icons'
 import {
@@ -32,6 +32,7 @@ const BRANCH_ROW = '#branch'
 const FLASH_MS = 2700
 const RUNNING_MAX_MS = 600_000
 const IGNORED_PRUNE_LIMIT = 40
+const NO_REPO_DEPTH = 4
 const DOUBLE_MS = 450
 const FIND_LIMIT = 200
 const READ_REVEAL_LIMIT = 12
@@ -45,7 +46,6 @@ const PRUNE = ['.git', 'node_modules', 'target', '.venv', '__pycache__', 'dist',
 let blink: Timer | null = null
 let generation = 0
 let lastPress = { key: '', at: 0 }
-let plain = false
 let noNerd = false
 let glyphSetting = 'auto'
 let follow = true
@@ -71,13 +71,13 @@ function lighten(hex: string): string {
 }
 
 async function get($: EngineInterface): Promise<FileTree> {
-  return (await $.state.get(TREE)).value ?? emptyTree('')
+  return { ...emptyTree(''), ...(await $.state.get(TREE)).value }
 }
 
 async function put($: EngineInterface, fn: (t: FileTree) => FileTree): Promise<void> {
   for (let i = 0; i < 20; i++) {
     const cur = await $.state.get(TREE)
-    const done = await $.state.set(TREE, fn(cur.value ?? emptyTree('')), { ifVersion: cur.version })
+    const done = await $.state.set(TREE, fn({ ...emptyTree(''), ...cur.value }), { ifVersion: cur.version })
     if (done.isSet) return
   }
 }
@@ -194,10 +194,11 @@ function refreshGit($: EngineInterface): Promise<void> {
     })
     return gitRun
   }
-  gitNext ??= gitRun.then(() => {
+  const rerun = () => {
     gitNext = null
     return refreshGit($)
-  })
+  }
+  gitNext ??= gitRun.then(rerun, rerun)
   return gitNext
 }
 
@@ -240,10 +241,10 @@ function pruneArgs(extra: string[] = []): string[] {
   return ['(', ...PRUNE.flatMap((name, i) => (i === 0 ? ['-name', name] : ['-o', '-name', name])), ...extra.flatMap(p => ['-o', '-path', p]), ')', '-prune', '-o']
 }
 
-async function changedSince($: EngineInterface, root: string, sinceMs: number, ignored: string[]): Promise<string[]> {
+async function changedSince($: EngineInterface, root: string, sinceMs: number, ignored: string[], depth: number): Promise<string[]> {
   const dirs = ignored.filter(p => p.startsWith(root + '/')).slice(0, IGNORED_PRUNE_LIMIT)
   try {
-    const run = await $.process.run(['find', root, '-xdev', ...pruneArgs(dirs), '-newermt', `@${(sinceMs / 1000).toFixed(3)}`, '-print'], { timeoutMs: 8_000 })
+    const run = await $.process.run(['find', '-H', root, '-xdev', ...(depth ? ['-maxdepth', String(depth)] : []), ...pruneArgs(dirs), '-newermt', `@${(sinceMs / 1000).toFixed(3)}`, '-print'], { timeoutMs: 8_000 })
     return run.stdout.split('\n').filter(p => p && p !== root)
   } catch {
     return []
@@ -291,13 +292,11 @@ async function flash($: EngineInterface, tones: Record<string, string>): Promise
     }
   })
   if (generation !== mine) return
-  const timer = $.clock.every(FLASH_MS, () => {
-    timer.cancel()
+  blink = $.clock.after(FLASH_MS, () => {
     if (generation !== mine) return
     blink = null
-    void patch($, () => ({ flash: [], flashDim: [], flashOn: false, flashTones: {} }))
+    void patch($, cur => (generation === mine ? { flash: [], flashDim: [], flashOn: false, flashTones: {} } : {}))
   })
-  blink = timer
 }
 
 async function followCwd($: EngineInterface): Promise<boolean> {
@@ -310,7 +309,7 @@ async function followCwd($: EngineInterface): Promise<boolean> {
 }
 
 type Pending = { actions: GitAction[]; ids: number[] }
-type Job = { p: Pending | null; since: number; initRepo: boolean }
+type Job = { p: Pending | null; since: number; initRepo: boolean; readOnly: boolean }
 
 async function startGit($: EngineInterface, actions: GitAction[]): Promise<number[]> {
   const now = await $.clock.now()
@@ -352,10 +351,7 @@ async function finishGit($: EngineInterface, p: Pending, ok: boolean): Promise<v
       return { ...a, state: ok ? 'done' : 'failed', label: ok ? action.done : `${action.verb} failed`, detail: action.verb === 'commit' ? commit : '', at: now }
     }),
   )
-  const expire = $.clock.every(ACTIVITY_TTL_MS + 500, () => {
-    expire.cancel()
-    void setActivities($, cur => cur.filter(a => a.state === 'running' || a.at > now))
-  })
+  $.clock.after(ACTIVITY_TTL_MS + 500, () => void setActivities($, cur => cur.filter(a => a.state === 'running' || a.at > now)))
 }
 
 async function gitPaths($: EngineInterface, root: string, prefix: string, committed: boolean): Promise<string[]> {
@@ -393,8 +389,8 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
   const fresh = await get($)
   const ignored = new Set(fresh.ignored)
   const tones: Record<string, string> = {}
-  if (showWrites) {
-    const hits = (await changedSince($, t.root, since, fresh.ignored)).filter(x => !underAny(x, ignored, t.root)).slice(0, FIND_LIMIT)
+  if (!jobs.every(j => j.readOnly)) {
+    const hits = (await changedSince($, t.root, since, fresh.ignored, fresh.top ? 0 : NO_REPO_DEPTH)).filter(x => !underAny(x, ignored, t.root)).slice(0, FIND_LIMIT)
     await revealPaths($, hits)
     const loaded = await get($)
     const open = new Set(loaded.expanded)
@@ -404,7 +400,7 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
     await loadDirs($, dirs)
     const present = new Set((await get($)).nodes.map(n => n.id))
     const touchTone = actions.find(a => !['commit', 'push', 'add'].includes(a.verb))?.tone ?? 'orange'
-    for (const id of hits) if (present.has(id)) tones[id] = touchTone
+    if (showWrites) for (const id of hits) if (present.has(id)) tones[id] = touchTone
   }
   if (showReads) {
     const found: string[] = []
@@ -478,7 +474,7 @@ async function listAll($: EngineInterface, t: FileTree): Promise<string[]> {
   try {
     const run = t.top
       ? await git($, t.root, ['ls-files', '-co', '--exclude-standard', '-z'], 10_000)
-      : await $.process.run(['find', t.root, '-xdev', ...pruneArgs(), '-type', 'f', '-print0'], { timeoutMs: 10_000 })
+      : await $.process.run(['find', '-H', t.root, '-xdev', '-maxdepth', '6', ...pruneArgs(), '-type', 'f', '-print0'], { timeoutMs: 10_000 })
     return run.stdout.split('\0').filter(Boolean).map(p => (p.startsWith('/') ? p : join(t.root, p)))
   } catch {
     return []
@@ -593,12 +589,15 @@ export const register: Register = (on, options) => {
       throw err
     }
     const failed = Boolean(result.deny || result.isError)
-    if (pending) await finishGit($, pending, !failed)
+    if (pending && result.deny) {
+      const ids = pending.ids
+      void setActivities($, cur => cur.filter(a => !ids.includes(a.id)))
+    } else if (pending) void finishGit($, pending, !failed)
     if (failed) return result
     if (e.tool === 'Bash') {
       const stdout = result.result && typeof result.result === 'object' && 'stdout' in result.result ? String(result.result.stdout) : ''
       if (showReads) queuedReads.push(...readTargets(command, cwd, stdout))
-      scheduleScan($, { p: pending, since, initRepo: actions.some(a => a.init) })
+      scheduleScan($, { p: pending, since, initRepo: actions.some(a => a.init), readOnly: !pending && readOnly(command) })
     } else {
       const file =
         'file_path' in e && typeof e.file_path === 'string'
@@ -679,7 +678,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (e.surface !== 'terminal' && e.surface !== 'desktop') return next(e)
-    plain = glyphSetting === 'plain' || (glyphSetting === 'auto' && (noNerd || e.surface === 'desktop'))
+    const unicode = glyphSetting === 'plain' || (glyphSetting === 'auto' && (noNerd || e.surface === 'desktop'))
     const { Box, Text, Button, Input, Client } = $.ui.resolve(e)
     const t = await get($)
     const theme: Theme = (await $.state.get(THEME)).value ?? DEFAULT_THEME
@@ -734,13 +733,13 @@ export const register: Register = (on, options) => {
       const meta = loc ? '' : n.kind === 'file' ? stamp(n.mtime) : ''
       const locText = loc ? `${loc[0] ? ` +${loc[0]}` : ''}${loc[1] ? ` -${loc[1]}` : ''}` : ''
       const dirCounts = n.kind === 'dir' ? countSegs(t.counts[n.id]) : []
-      const badge = dirCounts.length ? '' : status ? ` ${status}` : isIgnored ? (plain ? ' ⊘' : ' \u{f05e}') : '  '
+      const badge = dirCounts.length ? '' : status ? ` ${status}` : isIgnored ? (unicode ? ' ⊘' : ' \u{f05e}') : '  '
       const countsText = dirCounts.map(c => c.t).join('')
       const cols = Math.max(4, width - r.depth * 2 - 6 - (meta ? meta.length + 1 : 0) - locText.length - badge.length - countsText.length)
       const name = n.name.length > cols ? n.name.slice(0, cols - 1) + '…' : n.name
-      const caret = n.kind === 'dir' ? (plain ? (r.open ? '▾' : '▸') : r.open ? CHEVRON_OPEN : CHEVRON_CLOSED) + ' ' : '  '
+      const caret = n.kind === 'dir' ? (unicode ? (r.open ? '▾' : '▸') : r.open ? CHEVRON_OPEN : CHEVRON_CLOSED) + ' ' : '  '
       const isRepo = n.kind === 'dir' && n.id === t.top
-      const glyph = plain ? (n.kind === 'dir' ? '■' : '·') : fileIcon(n, r.open, isRepo)
+      const glyph = unicode ? (n.kind === 'dir' ? '■' : '·') : fileIcon(n, r.open, isRepo)
       const lit = isBright || isDim
       const left: Seg[] = [
         { t: '  '.repeat(r.depth) },
@@ -775,7 +774,7 @@ export const register: Register = (on, options) => {
       const label = b.head
       return (
         <Box flexDirection="row">
-          <Text color={isFlash ? (TONES[tone]?.solid ?? theme.accent) : theme.accent}>{(plain ? BRANCH_ICON.plain : BRANCH_ICON.nerd) + ' '}</Text>
+          <Text color={isFlash ? (TONES[tone]?.solid ?? theme.accent) : theme.accent}>{(unicode ? BRANCH_ICON.plain : BRANCH_ICON.nerd) + ' '}</Text>
           <Text bold color={isFlash ? (TONES[tone]?.solid ?? theme.fg) : theme.fg}>
             {label}
           </Text>
@@ -796,7 +795,7 @@ export const register: Register = (on, options) => {
     const chip = (a: Activity) => {
       const tone = a.state === 'failed' ? 'red' : a.tone
       const color = TONES[tone]?.solid ?? theme.accent
-      const icon = plain ? a.plain : a.nerd
+      const icon = unicode ? a.plain : a.nerd
       const hash = a.state === 'done' && a.kind === 'git commit' ? a.detail.split(' ')[0] ?? '' : ''
       return (
         <Box flexDirection="row" marginLeft={2}>
@@ -821,7 +820,7 @@ export const register: Register = (on, options) => {
               key="up"
               plain
               dimColor
-              label={plain ? '↑' : '\u{f005d}'}
+              label={unicode ? '↑' : '\u{f005d}'}
               onPress={() =>
                 void (async () => {
                   follow = false
@@ -833,7 +832,7 @@ export const register: Register = (on, options) => {
               key="cwd"
               plain
               dimColor={!follow}
-              label={plain ? '⌖' : '\u{f01a4}'}
+              label={unicode ? '⌖' : '\u{f01a4}'}
               onPress={() =>
                 void (async () => {
                   follow = true
@@ -845,7 +844,7 @@ export const register: Register = (on, options) => {
               key="refresh"
               plain
               dimColor
-              label={plain ? '↻' : '\u{f0450}'}
+              label={unicode ? '↻' : '\u{f0450}'}
               onPress={() =>
                 void (async () => {
                   const cur = await get($)
@@ -859,18 +858,18 @@ export const register: Register = (on, options) => {
               key="hidden"
               plain
               dimColor={!t.showHidden}
-              label={plain ? (t.showHidden ? '◉' : '○') : t.showHidden ? '\u{f0208}' : '\u{f0209}'}
+              label={unicode ? (t.showHidden ? '◉' : '○') : t.showHidden ? '\u{f0208}' : '\u{f0209}'}
               onPress={() => void patch($, cur => ({ showHidden: !cur.showHidden }))}
             />
-            <Button key="collapse" plain dimColor label={plain ? '⊟' : '\u{eac5}'} onPress={() => void patch($, () => ({ expanded: [] }))} />
+            <Button key="collapse" plain dimColor label={unicode ? '⊟' : '\u{eac5}'} onPress={() => void patch($, () => ({ expanded: [] }))} />
             {t.selected && (
-              <Button key="unselect" plain label={plain ? '✕' : '\u{f0156}'} onPress={() => void patch($, () => ({ selected: '' }))} />
+              <Button key="unselect" plain label={unicode ? '✕' : '\u{f0156}'} onPress={() => void patch($, () => ({ selected: '' }))} />
             )}
             <Text> </Text>
           </Box>
         </Box>
         {branchRow()}
-        {!t.top && <Text color={theme.muted}>{plain ? '± ' : '\u{e702} '}no git repo · git status starts after git init</Text>}
+        {!t.top && <Text color={theme.muted}>{unicode ? '± ' : '\u{e702} '}no git repo · git status starts after git init</Text>}
         <Input
           key="q"
           label="/ "

@@ -1,6 +1,6 @@
 import type { ClientModule } from 'claude-code'
 
-export type Seg = { t: string; c?: string; b?: boolean; s?: boolean; i?: boolean; sh?: string; dim?: boolean; one?: boolean; spin?: boolean }
+export type Seg = { t: string; c?: string; b?: boolean; s?: boolean; i?: boolean; sh?: string; dim?: boolean; one?: boolean; spin?: boolean; bg?: string; tab?: string }
 export type RowSpec = { id: string; left: Seg[]; right: Seg[] }
 export type RowsProps = {
   rows: RowSpec[]
@@ -10,7 +10,7 @@ export type RowsProps = {
   tones: Record<string, { bright: string[]; dim: string[] }>
   spinner?: string[]
 }
-type Local = { hover: number; phase: number; ref: { lit: boolean } }
+type Local = { hover: number; phase: number; ref: { stop?: () => void } }
 
 const TICK_MS = 90
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -23,16 +23,21 @@ function shimmer(i: number, phase: number, len: number, palette: string[]): stri
 
 const Rows: ClientModule<RowsProps, Local> = (props, surface) => {
   const { Box, Text } = surface.elements
-  if (surface.state === undefined) {
-    const ref = { lit: false }
-    surface.setState({ hover: -1, phase: 0, ref })
-    surface.every(TICK_MS, () => {
-      const cur = surface.state
-      if (cur?.ref.lit) surface.setState({ ...cur, phase: cur.phase + 1 })
-    })
+  let state = surface.state
+  if (state === undefined) {
+    state = { hover: -1, phase: 0, ref: {} }
+    surface.setState(state)
   }
-  const state = surface.state ?? { hover: -1, phase: 0, ref: { lit: false } }
-  state.ref.lit = props.rows.some(r => r.left.some(s => s.sh || s.spin) || r.right.some(s => s.sh || s.spin))
+  const lit = props.rows.some(r => r.left.some(s => s.sh || s.spin) || r.right.some(s => s.sh || s.spin))
+  if (lit && !state.ref.stop) {
+    state.ref.stop = surface.every(TICK_MS, () => {
+      const cur = surface.state
+      if (cur) surface.setState({ ...cur, phase: cur.phase + 1 })
+    })
+  } else if (!lit && state.ref.stop) {
+    state.ref.stop()
+    state.ref.stop = undefined
+  }
   surface.onPointer(e => {
     const cur = surface.state ?? state
     if (e.type === 'leave' || e.y < 0 || e.y >= props.rows.length) {
@@ -41,7 +46,17 @@ const Rows: ClientModule<RowsProps, Local> = (props, surface) => {
     }
     if (e.type === 'move' && !e.button && cur.hover !== e.y) surface.setState({ ...cur, hover: e.y })
     const row = props.rows[e.y]
-    if (e.type === 'down' && (e.button ?? 'left') === 'left' && row?.id) surface.post({ press: row.id, ctrl: Boolean(e.ctrl), shift: Boolean(e.shift) })
+    if (e.type !== 'down' || (e.button ?? 'left') !== 'left' || !row) return
+    let x = 0
+    for (const seg of row.left) {
+      const w = [...seg.t].length
+      if (seg.tab && e.x >= x && e.x < x + w) {
+        surface.post({ tab: seg.tab })
+        return
+      }
+      x += w
+    }
+    if (row.id) surface.post({ press: row.id, ctrl: Boolean(e.ctrl), shift: Boolean(e.shift) })
   })
   surface.onKey(e => surface.post({ key: e.key, ctrl: Boolean(e.ctrl), shift: Boolean(e.shift) }))
   const frames = props.spinner?.length ? props.spinner : FRAMES
@@ -56,7 +71,7 @@ const Rows: ClientModule<RowsProps, Local> = (props, surface) => {
     const palette = s.sh ? (s.dim ? props.tones[s.sh]?.dim : props.tones[s.sh]?.bright) : undefined
     if (!palette) {
       return (
-        <Text color={s.c} bold={s.b} strikethrough={s.s} italic={s.i}>
+        <Text color={s.c} backgroundColor={s.bg} bold={s.b} strikethrough={s.s} italic={s.i}>
           {s.t}
         </Text>
       )
