@@ -17,6 +17,8 @@
 
 > [!NOTE]
 > filetree is a Claude Code **mod**: a plugin of function hooks with its own pane. Mods need **Claude Code 2.1.287 or newer**, and the pane docks beside the transcript in fullscreen mode.
+>
+> Tested by hand in the terminal on Linux. macOS and the Code tab of the Claude Desktop app are covered by Claude Code's plugin test kit; Windows should work but is untested. Mods do not load in WSL sessions of the Desktop app.
 
 ---
 
