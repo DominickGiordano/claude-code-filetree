@@ -1,6 +1,7 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Activity, FileNode, FileTree, Theme } from '../types'
+import type { Activity, ContextMap, FileNode, FileTree, Theme, Touch } from '../types'
+import { detail, editorArgv, emptyContext, field, FILTERS, forgotten, lineOf, mentionText, noted, onlyShown, rollWeights, weigh, weight } from './context'
 import { BRANCH_ICON, type GitAction, gitActions, readOnly, readTargets, resolve, TONES } from './git'
 import type { RowSpec, RowsProps, Seg } from './rows'
 import { CHEVRON_CLOSED, CHEVRON_OPEN, fileIcon, GIT_COLOR } from './icons'
@@ -32,6 +33,7 @@ import {
 const TREE = { plugin: 'filetree', key: 'tree' } as const
 const THEME = { plugin: 'filetree', key: 'theme' } as const
 const ACTIVITY = { plugin: 'filetree', key: 'activity' } as const
+const CONTEXT = { plugin: 'filetree', key: 'context' } as const
 const PANE = 'filetree'
 const SHIMMER = Object.fromEntries(Object.entries(TONES).map(([k, v]) => [k, { bright: v.bright, dim: v.dim }]))
 const BRANCH_ROW = '#branch'
@@ -45,6 +47,7 @@ const SEARCH_REVEAL_LIMIT = 60
 const ACTIVITY_TTL_MS = 45_000
 const ADD_COLOR = '#98c379'
 const DEL_COLOR = '#e06c75'
+const CONTEXT_COLOR = TONES.purple?.solid ?? '#c084fc'
 const THEME_FILE = '.local/state/omarchy/current/theme/colors.toml'
 const FONT_SCRIPT =
   'if command -v fc-list >/dev/null 2>&1; then f=$(fc-list ":charset=$1" file | head -n1 | cut -d: -f1); ' +
@@ -62,6 +65,7 @@ let generation = 0
 let lastPress = { key: '', at: 0 }
 let noNerd = false
 let glyphSetting = 'auto'
+let editorSetting = 'auto'
 let follow = true
 let scanning: Promise<void> | null = null
 let scanJobs: Job[] = []
@@ -134,6 +138,36 @@ async function setActivities($: EngineInterface, fn: (list: Activity[]) => Activ
     const done = await $.state.set(ACTIVITY, fn(cur.value ?? []).slice(-6), { ifVersion: cur.version })
     if (done.isSet) return
   }
+}
+
+async function contextOf($: EngineInterface): Promise<ContextMap> {
+  return { ...emptyContext(), ...(await $.state.get(CONTEXT)).value }
+}
+
+async function putContext($: EngineInterface, fn: (c: ContextMap) => Partial<ContextMap>): Promise<void> {
+  for (let i = 0; i < 20; i++) {
+    const cur = await $.state.get(CONTEXT)
+    const base = { ...emptyContext(), ...cur.value }
+    const done = await $.state.set(CONTEXT, { ...base, ...fn(base) }, { ifVersion: cur.version })
+    if (done.isSet) return
+  }
+}
+
+async function who($: EngineInterface, agentId: string | undefined): Promise<string> {
+  if (!agentId) return 'main'
+  const known = (await contextOf($)).agents[agentId]
+  if (known) return known
+  try {
+    return (await $.agent.list()).find(a => a.id === agentId)?.type ?? 'subagent'
+  } catch {
+    return 'subagent'
+  }
+}
+
+async function recordTouch($: EngineInterface, paths: string[], how: Touch['how'], agentId: string | undefined, line = 1, tokens = 0): Promise<void> {
+  if (paths.length === 0) return
+  const touch = { how, by: await who($, agentId), at: await $.clock.now(), line }
+  await putContext($, c => ({ files: noted(c.files, paths, touch, tokens, !agentId && how !== 'committed' && tokens > 0) }))
 }
 
 async function list($: EngineInterface, dir: string): Promise<FileNode[]> {
@@ -399,7 +433,7 @@ async function followCwd($: EngineInterface): Promise<boolean> {
 }
 
 type Pending = { actions: GitAction[]; ids: number[] }
-type Job = { p: Pending | null; since: Since; initRepo: boolean; readOnly: boolean }
+type Job = { p: Pending | null; since: Since; initRepo: boolean; readOnly: boolean; agent?: string }
 
 async function startGit($: EngineInterface, actions: GitAction[]): Promise<number[]> {
   const now = await $.clock.now()
@@ -511,6 +545,7 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
   const writers = jobs.filter(j => !j.readOnly)
   const since = (writers.length ? writers : jobs).reduce((a, j) => (j.since.ms < a.ms ? j.since : a), (writers[0] ?? jobs[0])?.since ?? { ms: 0, mark: '', os: 'linux' as const })
   const writes = !jobs.every(j => j.readOnly)
+  const by = (jobs.find(j => !j.readOnly) ?? jobs[0])?.agent
   const before = dirty.root === t.root ? dirty.files : {}
   if (jobs.some(j => j.initRepo)) await detectRepo($)
   else if (!t.top && (await exists($, join(t.root, '.git')))) await detectRepo($)
@@ -534,9 +569,11 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
       return { expanded: cur.expanded.filter(id => ids.has(id)) }
     })
     const present = new Set((await get($)).nodes.map(n => n.id))
+    await recordTouch($, hits, 'wrote', by)
     const touchTone = actions.find(a => !['commit', 'push', 'add'].includes(a.verb))?.tone ?? 'orange'
     if (showWrites) for (const id of hits) if (present.has(id)) tones[id] = touchTone
   }
+  await recordTouch($, reads.filter(r => r !== t.root && inside(t.root, r) && !underAny(r, ignored, t.root)), 'read', by)
   if (showReads) {
     const found: string[] = []
     for (const r of reads) {
@@ -549,18 +586,20 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
       for (const r of found) if (shown.has(r) && !tones[r]) tones[r] = 'purple'
     }
   }
-  if (showWrites && actions.length) {
+  if (actions.length) {
     const final = await get($)
     const committed = actions.some(a => a.verb === 'commit')
     if ((committed || actions.some(a => a.verb === 'add')) && final.top) {
-      const paths = (await gitPaths($, final.root, final.prefix, committed)).filter(x => !underAny(x, ignored, final.root)).slice(0, READ_REVEAL_LIMIT)
+      const all = (await gitPaths($, final.root, final.prefix, committed)).filter(x => !underAny(x, ignored, final.root))
+      if (committed) await recordTouch($, all, 'committed', by)
+      const paths = showWrites ? all.slice(0, READ_REVEAL_LIMIT) : []
       await revealPaths($, paths)
       const shown = new Set((await get($)).nodes.map(n => n.id))
       for (const x of paths) if (shown.has(x)) tones[x] = 'green'
     }
     const pushLike = actions.find(a => ['push', 'pull', 'fetch', 'checkout', 'switch', 'branch', 'merge', 'rebase', 'tag'].includes(a.verb) || a.kind.startsWith('gh '))
-    if (pushLike) tones[BRANCH_ROW] = pushLike.tone
-    else if (committed) tones[BRANCH_ROW] = 'green'
+    if (showWrites && pushLike) tones[BRANCH_ROW] = pushLike.tone
+    else if (showWrites && committed) tones[BRANCH_ROW] = 'green'
   }
   await flash($, tones)
 }
@@ -740,6 +779,39 @@ async function openNode($: EngineInterface, n: FileNode): Promise<void> {
   } else await openFile($, n.id)
 }
 
+async function cycleFilter($: EngineInterface): Promise<void> {
+  const c = await contextOf($)
+  const filter = FILTERS[(FILTERS.indexOf(c.filter) + 1) % FILTERS.length] ?? 'all'
+  await putContext($, () => ({ filter }))
+  await revealPaths($, [...(onlyShown({ ...c, filter }) ?? [])])
+  await patch($, () => ({ scroll: null }))
+}
+
+async function openInEditor($: EngineInterface, path: string): Promise<void> {
+  const argv = editorArgv(editorSetting, path, (await contextOf($)).files[path]?.line ?? 1)
+  let why = ''
+  try {
+    const run = await $.process.run(argv, { timeoutMs: 10_000 })
+    if (run.exitCode === 0) return
+    why = `exited ${run.exitCode}`
+  } catch (err) {
+    why = err instanceof Error ? err.message : String(err)
+  }
+  if (editorSetting.trim() && editorSetting.trim() !== 'auto') {
+    $.ui.toast(`could not open ${path} with ${argv[0] ?? ''}: ${why}`)
+    return
+  }
+  $.ui.toast(`code is not available (${why}); opening with the default app`)
+  await openFile($, path)
+}
+
+async function mention($: EngineInterface, path: string): Promise<void> {
+  const box = await $.prompt.read()
+  const text = mentionText(path, await cwdOf($), box.text.slice(0, box.cursor))
+  const filled = await $.prompt.fill({ text, mode: 'insert' })
+  if (!filled.isFilled) $.ui.toast(filled.refusal === 'dialog' ? `Close the dialog, then mention ${text.trim()}` : `Could not put ${text.trim()} in the prompt`)
+}
+
 function shortPath(path: string): string {
   return home && inside(home, path) ? `~${path.slice(home.length)}` : path
 }
@@ -749,6 +821,7 @@ export const register: Register = (on, options) => {
   const activity = typeof options?.activity === 'string' ? options.activity : 'reads and writes'
   showReads = activity.includes('reads')
   showWrites = activity.includes('writes')
+  editorSetting = typeof options?.editor === 'string' ? options.editor : 'auto'
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'filetree', description: 'Show the file tree; args: [path] (no path = cwd)' })
     const windows = (await $.env.get('OS')) === 'Windows_NT'
@@ -817,8 +890,8 @@ export const register: Register = (on, options) => {
     }
     if (e.tool === 'Bash') {
       const stdout = result.result && typeof result.result === 'object' && 'stdout' in result.result ? String(result.result.stdout) : ''
-      if (showReads) queuedReads.push(...readTargets(command, cwd, stdout, home))
-      scheduleScan($, { p: pending, since, initRepo: actions.some(a => a.init), readOnly: quiet })
+      queuedReads.push(...readTargets(command, cwd, stdout, home))
+      scheduleScan($, { p: pending, since, initRepo: actions.some(a => a.init), readOnly: quiet, agent: e.agentId })
       if (follow && /(^|[;&|\s])(cd|pushd|popd)(\s|$)/.test(command)) $.clock.after(400, () => void followCwd($))
     } else {
       const file =
@@ -834,9 +907,35 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: 'Read' }, async ($, e, next) => {
     const result = await next(e)
-    if (result.deny || result.isError || e.tool !== 'Read' || !showReads) return result
-    void touched($, [posix(e.file_path)], 'purple', true)
+    if (result.deny || result.isError || e.tool !== 'Read') return result
+    void touched($, [posix(e.file_path)], 'purple', showReads)
     return result
+  })
+
+  on('agent.spawn', async ($, e, next) => {
+    const r = await next(e)
+    const id = r.agentId
+    if (id) await putContext($, c => ({ agents: { ...c.agents, [id]: e.subagentType } }))
+    return r
+  })
+
+  on('tool.call', { tool: ['Read', 'Edit', 'Write', 'NotebookEdit'] }, async ($, e, next) => {
+    const result = await next(e)
+    if (result.deny || result.isError) return result
+    const path = posix(field(e, 'file_path') || field(e, 'notebook_path'))
+    if (path) void recordTouch($, [path], e.tool === 'Read' ? 'read' : e.tool === 'Write' ? 'wrote' : 'edited', e.agentId, lineOf(e.tool, e, result.result), weigh(e, result))
+    return result
+  })
+
+  on('session.compact', async ($, e, next) => {
+    const r = await next(e)
+    if (!e.agentId && e.trigger !== 'precompute' && !r.skip) await putContext($, c => ({ files: forgotten(c.files) }))
+    return r
+  })
+
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') await putContext($, c => ({ ...emptyContext(), filter: c.filter }))
+    return next(e)
   })
 
   on('ui.message', async ($, e, next) => {
@@ -862,7 +961,7 @@ export const register: Register = (on, options) => {
       return {}
     }
     if (typeof data.key !== 'string') return {}
-    const rows = visibleRows(t)
+    const rows = visibleRows(t, onlyShown(await contextOf($)))
     const at = rows.findIndex(r => r.node.id === t.cursor)
     const cur = rows[at]?.node
     const move = (d: number) => {
@@ -882,6 +981,9 @@ export const register: Register = (on, options) => {
       else if (cur.parent !== t.root) await patch($, () => ({ cursor: cur.parent }))
     } else if (cur && data.key === 'return') await (cur.kind !== 'dir' ? openNode($, cur) : toggle($, cur))
     else if (cur && data.key === ' ') await toggle($, cur)
+    else if (data.key === 'f') await cycleFilter($)
+    else if (cur && (data.key === '@' || data.key === 'm')) await mention($, cur.id)
+    else if (cur && data.key === 'e') await openInEditor($, cur.id)
     return {}
   })
 
@@ -957,8 +1059,11 @@ export const register: Register = (on, options) => {
     const ignored = new Set(t.ignored)
     const untracked = new Set(t.untrackedDirs)
     const width = Math.max(24, e.props.bodyColumns)
-    const rows = visibleRows(t)
-    const fixed = 2 + (t.top ? (t.branch ? 1 : 0) : 1) + (t.selected || latest ? 1 : 0)
+    const ctx = await contextOf($)
+    const rows = visibleRows(t, onlyShown(ctx))
+    const weights = rollWeights(ctx.files, t.root)
+    const touch = ctx.files[t.cursor] ?? ctx.files[t.selected]
+    const fixed = 2 + (t.top ? (t.branch ? 1 : 0) : 1) + (t.selected || latest ? 1 : 0) + (touch ? 1 : 0)
     const room = Math.max(5, (e.props.scroll?.bodyRows ?? 40) - fixed)
     const isLit = (id: string) => bright.has(id) || dimmed.has(id)
     const focus = t.flashOn ? ([...t.flash].reverse().find(id => id !== BRANCH_ROW) ?? t.cursor) : t.cursor
@@ -1008,7 +1113,9 @@ export const register: Register = (on, options) => {
       const dirCounts = n.kind === 'dir' ? countSegs(t.counts[n.id]) : []
       const badge = dirCounts.length ? '' : status ? ` ${status}` : isIgnored ? (unicode ? ' ⊘' : ' \u{f05e}') : '  '
       const countsText = dirCounts.map(c => c.t).join('')
-      const cols = Math.max(4, width - r.depth * 2 - 6 - (meta ? meta.length + 1 : 0) - locText.length - badge.length - countsText.length)
+      const w = weights[n.id]
+      const weightText = w ? ` · ${weight(w)}` : ''
+      const cols = Math.max(4, width - r.depth * 2 - 6 - (meta ? meta.length + 1 : 0) - locText.length - badge.length - countsText.length - weightText.length)
       const name = n.name.length > cols ? n.name.slice(0, cols - 1) + '…' : n.name
       const caret = n.kind === 'dir' ? (unicode ? (r.open ? '▾' : '▸') : r.open ? CHEVRON_OPEN : CHEVRON_CLOSED) + ' ' : '  '
       const isRepo = n.kind === 'dir' && n.id === t.top
@@ -1024,6 +1131,7 @@ export const register: Register = (on, options) => {
       if (meta) right.push({ t: ` ${meta}`, c: theme.muted })
       if (loc && loc[0] > 0) right.push({ t: ` +${loc[0]}`, c: ADD_COLOR })
       if (loc && loc[1] > 0) right.push({ t: ` -${loc[1]}`, c: DEL_COLOR })
+      if (weightText) right.push({ t: weightText, c: CONTEXT_COLOR })
       right.push(...dirCounts)
       if (badge) right.push({ t: badge, c: status ? gitColor : theme.muted, b: true })
       return { id: n.id, left: clean(left), right: clean(right) }
@@ -1031,7 +1139,7 @@ export const register: Register = (on, options) => {
 
     const note = (text: string): RowSpec => ({ id: '', left: [{ t: text, c: theme.muted }], right: [] })
     const specs: RowSpec[] = [
-      ...(rows.length === 0 ? [note('empty')] : []),
+      ...(rows.length === 0 ? [note(ctx.filter === 'context' ? 'nothing in context' : ctx.filter === 'touched' ? 'nothing touched this session' : 'empty')] : []),
       ...pinned.map(rowSpec),
       ...(pinned.length > 0 ? [note('  ⋮')] : []),
       ...shown.map(rowSpec),
@@ -1102,6 +1210,14 @@ export const register: Register = (on, options) => {
           </Text>
           <Box flexGrow={1} />
           <Box flexDirection="row" gap={2}>
+            {weights[t.root] ? <Text color={CONTEXT_COLOR}>{`≈${weight(weights[t.root] ?? 0)}`}</Text> : null}
+            <Button
+              key="filter"
+              plain
+              dimColor={ctx.filter === 'all'}
+              label={ctx.filter === 'context' ? '◆ ctx' : ctx.filter === 'touched' ? '◈ touched' : '◇'}
+              onPress={() => void cycleFilter($)}
+            />
             <Button
               key="up"
               plain
@@ -1148,6 +1264,8 @@ export const register: Register = (on, options) => {
               onPress={() => void patch($, cur => ({ showHidden: !cur.showHidden }))}
             />
             <Button key="collapse" plain dimColor label={unicode ? '⊟' : '\u{eac5}'} onPress={() => void patch($, cur => ({ expanded: [], nodes: dropBelow(cur.nodes, cur.nodes.filter(x => x.parent === cur.root && x.kind === 'dir').map(x => x.id)) }))} />
+            {t.selected && <Button key="mention" plain label="@" onPress={() => void mention($, t.selected)} />}
+            {t.selected && <Button key="editor" plain label={unicode ? '✎' : '\u{f044}'} onPress={() => void openInEditor($, t.selected)} />}
             {t.selected && (
               <Button key="unselect" plain label={unicode ? '⊘' : '\u{f0777}'} onPress={() => void patch($, () => ({ selected: '' }))} />
             )}
@@ -1177,6 +1295,11 @@ export const register: Register = (on, options) => {
           props={{ rows: specs, active: t.cursor, activeBg: theme.selection, hoverBg: lighten(theme.selection), tones: SHIMMER, pointer, ...(bar ? { bar } : {}) } satisfies RowsProps}
         />
         <Box flexGrow={1} />
+        {touch && (
+          <Text color={touch.live ? CONTEXT_COLOR : theme.muted} wrap="truncate-end">
+            {detail(touch, now)}
+          </Text>
+        )}
         {(t.selected || latest) && (
           <Box flexDirection="row">
             {t.selected ? (
