@@ -687,7 +687,7 @@ export const register: Register = on => {
     const untracked = new Set(t.untrackedDirs)
     const width = Math.max(24, e.props.bodyColumns)
     const rows = visibleRows(t)
-    const fixed = 5 + recent.length + (t.selected ? 1 : 0)
+    const fixed = 6
     const room = Math.max(5, (e.props.scroll?.bodyRows ?? 40) - fixed)
     const isLit = (id: string) => bright.has(id) || dimmed.has(id)
     const focus = t.flashOn ? ([...t.flash].reverse().find(id => id !== BRANCH_ROW) ?? t.cursor) : t.cursor
@@ -780,14 +780,13 @@ export const register: Register = on => {
       )
     }
 
-    const activityRow = (a: Activity) => {
-      const kindVerb = a.kind.replace(/^(git|gh) /, '')
+    const chip = (a: Activity) => {
       const tone = a.state === 'failed' ? 'red' : a.tone
       const color = TONES[tone]?.solid ?? theme.accent
       const icon = plain ? a.plain : a.nerd
-      const mark = a.state === 'running' ? (plain ? '…' : '\u{f110}') : a.state === 'done' ? '✓' : '✗'
+      const hash = a.state === 'done' && a.kind === 'git commit' ? a.detail.split(' ')[0] ?? '' : ''
       return (
-        <Box flexDirection="row">
+        <Box flexDirection="row" marginLeft={2}>
           <Text color={color}>{icon + ' '}</Text>
           {a.state === 'running' ? (
             <Text bold>
@@ -796,15 +795,9 @@ export const register: Register = on => {
               ))}
             </Text>
           ) : (
-            <Text bold color={color}>
-              {a.label}
-            </Text>
+            <Text color={color}>{a.label}</Text>
           )}
-          <Text color={theme.muted} wrap="truncate-end">
-            {a.detail ? `  ${a.detail}` : a.state === 'running' ? `  ${kindVerb}` : ''}
-          </Text>
-          <Box flexGrow={1} />
-          <Text color={color}>{` ${mark}`}</Text>
+          {hash && <Text color={theme.muted}>{` ${hash}`}</Text>}
         </Box>
       )
     }
@@ -871,7 +864,6 @@ export const register: Register = on => {
         </Box>
         {branchRow()}
         {!t.top && <Text color={theme.muted}>{plain ? '± ' : '\u{e702} '}no git repo · git status starts after git init</Text>}
-        {recent.map(activityRow)}
         <Input
           key="q"
           label="/ "
@@ -887,10 +879,18 @@ export const register: Register = on => {
           props={{ rows: JSON.parse(JSON.stringify(specs)) as RowSpec[], active: t.cursor, activeBg: theme.selection, hoverBg: lighten(theme.selection) } satisfies RowsProps}
         />
         <Box flexGrow={1} />
-        {t.selected && (
-          <Text dimColor wrap="truncate-start">
-            selected: {t.selected.startsWith(t.root + '/') ? t.selected.slice(t.root.length + 1) : shortPath(t.selected)}
-          </Text>
+        {(t.selected || recent.length > 0) && (
+          <Box flexDirection="row">
+            {t.selected ? (
+              <Box flexShrink={1}>
+                <Text dimColor wrap="truncate-start">
+                  selected: {t.selected.startsWith(t.root + '/') ? t.selected.slice(t.root.length + 1) : shortPath(t.selected)}
+                </Text>
+              </Box>
+            ) : null}
+            <Box flexGrow={1} />
+            {[...recent].reverse().map(chip)}
+          </Box>
         )}
       </Box>
     )
