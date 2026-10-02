@@ -10,8 +10,9 @@ export type RowsProps = {
   tones: Record<string, { bright: string[]; dim: string[] }>
   spinner?: string[]
   pointer?: boolean
+  bar?: { pos: number; size: number; thumb: string; track: string }
 }
-type Local = { hover: number; phase: number; ref: { stop?: () => void; unpoint?: () => void } }
+type Local = { hover: number; phase: number; drag: boolean; ref: { stop?: () => void; unpoint?: () => void } }
 
 const TICK_MS = 90
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -26,7 +27,7 @@ const Rows: ClientModule<RowsProps, Local> = (props, surface) => {
   const { Box, Text } = surface.elements
   let state = surface.state
   if (state === undefined) {
-    state = { hover: -1, phase: 0, ref: {} }
+    state = { hover: -1, phase: 0, drag: false, ref: {} }
     surface.setState(state)
   }
   const lit = props.rows.some(r => r.left.some(s => s.sh || s.spin) || r.right.some(s => s.sh || s.spin))
@@ -44,6 +45,19 @@ const Rows: ClientModule<RowsProps, Local> = (props, surface) => {
     state.ref.unpoint = undefined
   } else state.ref.unpoint = surface.onPointer(e => {
     const cur = surface.state ?? state
+    const span = Math.max(1, props.rows.length - 1)
+    const onBar = Boolean(props.bar) && e.x >= surface.columns - 1
+    if (props.bar && (cur.drag || (onBar && e.type === 'down' && (e.button ?? 'left') === 'left'))) {
+      if (e.type === 'up' || e.type === 'leave') {
+        surface.setState({ ...cur, drag: false })
+        return
+      }
+      if (e.type === 'down' || e.type === 'move') {
+        if (!cur.drag) surface.setState({ ...cur, drag: true, hover: -1 })
+        surface.post({ scrollTo: Math.max(0, Math.min(1, e.y / span)) })
+        return
+      }
+    }
     if (e.type === 'leave' || e.y < 0 || e.y >= props.rows.length) {
       if (cur.hover !== -1) surface.setState({ ...cur, hover: -1 })
       return
@@ -110,6 +124,11 @@ const Rows: ClientModule<RowsProps, Local> = (props, surface) => {
           </Box>
           <Box flexGrow={1} />
           {r.right.map(draw)}
+          {props.bar && (
+            <Text color={i >= props.bar.pos && i < props.bar.pos + props.bar.size ? props.bar.thumb : props.bar.track}>
+              {i >= props.bar.pos && i < props.bar.pos + props.bar.size ? '┃' : '│'}
+            </Text>
+          )}
         </Box>
       ))}
     </Box>

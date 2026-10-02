@@ -1,4 +1,4 @@
-<h1 align="center">filetree</h1>
+<h1 align="center">Claude Code Filetree</h1>
 
 <p align="center">
   An IDE-style file tree for Claude Code that shows what Claude is doing and where in files
@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Claude_Code-%E2%89%A5_2.1.287-D97757?logo=claude&logoColor=fff" alt="Claude Code 2.1.287 or newer">
-  <img src="https://img.shields.io/badge/version-0.2.7-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.2.8-blue" alt="Version">
   <img src="https://img.shields.io/badge/type-mod-6f42c1" alt="Claude Code mod">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>

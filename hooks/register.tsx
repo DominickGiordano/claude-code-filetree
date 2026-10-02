@@ -73,6 +73,7 @@ let showWrites = true
 let searchIndex: { root: string; paths: Promise<string[]> } | null = null
 let activityId = 0
 let pointer = true
+let view = { from: 0, max: 0 }
 let home = ''
 let platform: Promise<'linux' | 'darwin' | 'win32'> | null = null
 let dirty: { root: string; files: Record<string, Change> } = { root: '', files: {} }
@@ -376,6 +377,7 @@ async function flash($: EngineInterface, tones: Record<string, string>): Promise
       flashOn: true,
       flashTones: all,
       expanded: [...open],
+      scroll: null,
     }
   })
   if (generation !== mine) return
@@ -567,7 +569,7 @@ async function reveal($: EngineInterface, paths: string[]): Promise<void> {
   await patch($, cur => {
     const open = new Set(cur.expanded)
     for (const p of paths) for (const a of ancestorsOf(p, cur.root)) open.add(a)
-    return { expanded: [...open], cursor: paths[paths.length - 1] ?? cur.cursor }
+    return { expanded: [...open], cursor: paths[paths.length - 1] ?? cur.cursor, scroll: null }
   })
 }
 
@@ -635,7 +637,7 @@ async function jump($: EngineInterface, query: string): Promise<void> {
   await patch($, cur => {
     const open = new Set(cur.expanded)
     for (const p of hits) for (const a of ancestorsOf(p, cur.root)) open.add(a)
-    return { query: '', expanded: [...open], cursor: hits[0] ?? cur.cursor }
+    return { query: '', expanded: [...open], cursor: hits[0] ?? cur.cursor, scroll: null }
   })
 }
 
@@ -799,11 +801,17 @@ export const register: Register = (on, options) => {
 
   on('ui.message', async ($, e, next) => {
     if (e.requestId !== PANE || e.element !== 'rows' || !e.data || typeof e.data !== 'object') return next(e)
-    const data = e.data as { press?: unknown; key?: unknown; ctrl?: unknown; shift?: unknown }
+    const data = e.data as { press?: unknown; key?: unknown; ctrl?: unknown; shift?: unknown; scrollTo?: unknown }
     const t = await get($)
+    if (typeof data.scrollTo === 'number') {
+      const to = Math.round(Math.max(0, Math.min(1, data.scrollTo)) * view.max)
+      if (to !== t.scroll) await patch($, () => ({ scroll: to }))
+      return {}
+    }
     if (typeof data.press === 'string') {
       const n = t.nodes.find(x => x.id === data.press)
       if (!n) return {}
+      if (t.scroll === null) await patch($, () => ({ scroll: view.from }))
       if (data.ctrl || data.shift) await openNode($, n)
       else await press($, n)
       return {}
@@ -814,7 +822,7 @@ export const register: Register = (on, options) => {
     const cur = rows[at]?.node
     const move = (d: number) => {
       const target = rows[Math.max(0, Math.min(rows.length - 1, (at < 0 ? 0 : at) + d))]
-      return target ? patch($, () => ({ cursor: target.node.id })) : Promise.resolve()
+      return target ? patch($, () => ({ cursor: target.node.id, scroll: null })) : Promise.resolve()
     }
     if (data.key === 'up' || data.key === 'k') await move(-1)
     else if (data.key === 'down' || data.key === 'j') await move(1)
@@ -826,6 +834,13 @@ export const register: Register = (on, options) => {
       else if (cur.parent !== t.root) await patch($, () => ({ cursor: cur.parent }))
     } else if (cur && data.key === 'return') await (cur.kind !== 'dir' ? openNode($, cur) : toggle($, cur))
     else if (cur && data.key === ' ') await toggle($, cur)
+    return {}
+  })
+
+  on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const t = await get($)
+    const to = Math.max(0, Math.min(view.max, (t.scroll ?? view.from) + Math.sign(e.by) * Math.max(3, Math.abs(e.by))))
+    if (to !== t.scroll) await patch($, () => ({ scroll: to }))
     return {}
   })
 
@@ -884,6 +899,12 @@ export const register: Register = (on, options) => {
       from = Math.max(0, Math.min(at - Math.floor(rest / 2), rows.length - rest))
       pinned = rows.slice(0, from).filter(r => isLit(r.node.id)).slice(-cap)
     }
+    const max = Math.max(0, rows.length - room)
+    if (t.scroll !== null) {
+      from = Math.max(0, Math.min(t.scroll, max))
+      pinned = []
+    }
+    view = { from, max }
     const shown = rows.slice(from, from + room - pinned.length)
     const totals: [number, number] = t.top ? (t.diff[t.root] ?? [0, 0]) : [0, 0]
     const countSegs = (c: [number, number, number] | undefined): Seg[] => {
@@ -940,10 +961,13 @@ export const register: Register = (on, options) => {
       ...(rows.length === 0 ? [note('empty')] : []),
       ...pinned.map(rowSpec),
       ...(pinned.length > 0 ? [note('  ⋮')] : []),
-      ...(from > 0 && pinned.length === 0 ? [note(`… ${from} above`)] : []),
       ...shown.map(rowSpec),
-      ...(from + shown.length < rows.length ? [note(`… ${rows.length - from - shown.length} below`)] : []),
     ]
+    const barSize = Math.max(1, Math.round((specs.length * shown.length) / Math.max(1, rows.length)))
+    const bar =
+      rows.length > shown.length + pinned.length
+        ? { pos: max ? Math.round((from / max) * (specs.length - barSize)) : 0, size: barSize, thumb: theme.accent, track: theme.muted }
+        : undefined
 
     const branchRow = () => {
       if (!t.top || !t.branch) return null
@@ -1072,7 +1096,7 @@ export const register: Register = (on, options) => {
         <Client
           key="rows"
           module="./rows.tsx"
-          props={{ rows: specs, active: t.cursor, activeBg: theme.selection, hoverBg: lighten(theme.selection), tones: SHIMMER, pointer } satisfies RowsProps}
+          props={{ rows: specs, active: t.cursor, activeBg: theme.selection, hoverBg: lighten(theme.selection), tones: SHIMMER, pointer, ...(bar ? { bar } : {}) } satisfies RowsProps}
         />
         <Box flexGrow={1} />
         {(t.selected || latest) && (

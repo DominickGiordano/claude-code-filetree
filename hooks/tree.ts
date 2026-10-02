@@ -35,6 +35,7 @@ export function emptyTree(root: string): FileTree {
     flashDim: [],
     flashOn: false,
     flashTones: {},
+    scroll: null,
   }
 }
 

@@ -231,3 +231,35 @@ test('NotebookEdit refreshes git and lists the notebook folder', { timeoutMs: 20
   expect(shown).toContain('+4')
   await ui.unmount()
 })
+
+test('long trees scroll: wheel, scrollbar drag, and a click does not jump the view', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/big'
+  const names = Array.from({ length: 60 }, (_, i) => [`f${String(i).padStart(2, '0')}.txt`, 'file'] as [string, 'file'])
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: names }, status: '', numstat: '' }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const props = { ...paneProps(60), scroll: { offset: 0, bodyRows: 20 } }
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props })
+  await clock.settle()
+  const rowsOf = async () => ((await ui.drawn()) as any).children.find((c: any) => c.type === 'Client').props.props
+  let p = await rowsOf()
+  expect(p.bar).toBeDefined()
+  expect(p.rows[0].id).toBe(`${root}/f00.txt`)
+  expect(JSON.stringify(p.rows)).not.toContain('below')
+  await $.ui.scroll({ component: 'Pane', requestId: 'filetree', by: 1 } as any)
+  await clock.settle()
+  p = await rowsOf()
+  expect(p.rows[0].id).toBe(`${root}/f03.txt`)
+  await ui.post({ scrollTo: 1 }, { in: 'rows' })
+  await clock.settle()
+  p = await rowsOf()
+  expect(p.rows.at(-1).id).toBe(`${root}/f59.txt`)
+  const first = p.rows[0].id
+  await ui.post({ press: p.rows[5].id }, { in: 'rows' })
+  await clock.settle()
+  p = await rowsOf()
+  expect(p.rows[0].id).toBe(first)
+  expect(p.active).toBe(p.rows[5].id)
+  await ui.unmount()
+})
