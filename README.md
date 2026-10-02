@@ -1,8 +1,7 @@
 <h1 align="center">filetree</h1>
 
 <p align="center">
-  An IDE-style file tree for Claude Code that shows what Claude is doing and where in files <br></br>
-  <i>Git status, lines changed and a live shimmer on every file Claude reads, writes or commits</i>
+  An IDE-style file tree for Claude Code that shows what Claude is doing and where in files
 </p>
 
 <p align="center">
