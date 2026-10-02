@@ -704,7 +704,7 @@ export const register: Register = on => {
     const shown = rows.slice(from, from + room - pinned.length)
     const totals: [number, number] = t.top ? (t.diff[t.root] ?? [0, 0]) : [0, 0]
     const changedFiles = t.top ? t.changed : 0
-    const header = t.top ? `${t.top.split('/').pop() ?? t.top}${t.root.slice(t.top.length)}` : shortPath(t.root)
+    const header = t.top ? `${t.top.split('/').pop() ?? t.top}${t.root.slice(t.top.length)}` : t.root.split('/').pop() || t.root
 
     const shimmerText = (text: string, tone: string, dim: boolean, bold: boolean) => (
       <Text bold={bold}>
@@ -810,7 +810,7 @@ export const register: Register = on => {
     }
 
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" minHeight={Math.max(1, (e.props.scroll?.bodyRows ?? 1) - 1)}>
         <Box flexDirection="row">
           <Text bold color={theme.accent} wrap="truncate-start">
             {header}
@@ -884,11 +884,12 @@ export const register: Register = on => {
         <Client
           key="rows"
           module="./rows.tsx"
-          props={{ rows: specs, active: t.cursor, activeBg: theme.selection, hoverBg: lighten(theme.selection) } satisfies RowsProps}
+          props={{ rows: JSON.parse(JSON.stringify(specs)) as RowSpec[], active: t.cursor, activeBg: theme.selection, hoverBg: lighten(theme.selection) } satisfies RowsProps}
         />
+        <Box flexGrow={1} />
         {t.selected && (
-          <Text color="cyan" wrap="truncate-start">
-            ● {t.selected.startsWith(t.root + '/') ? t.selected.slice(t.root.length + 1) : shortPath(t.selected)} goes with your next prompts
+          <Text dimColor wrap="truncate-start">
+            selected: {t.selected.startsWith(t.root + '/') ? t.selected.slice(t.root.length + 1) : shortPath(t.selected)}
           </Text>
         )}
       </Box>
