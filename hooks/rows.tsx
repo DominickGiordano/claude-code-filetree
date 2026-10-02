@@ -9,8 +9,9 @@ export type RowsProps = {
   hoverBg: string
   tones: Record<string, { bright: string[]; dim: string[] }>
   spinner?: string[]
+  pointer?: boolean
 }
-type Local = { hover: number; phase: number; ref: { stop?: () => void } }
+type Local = { hover: number; phase: number; ref: { stop?: () => void; unpoint?: () => void } }
 
 const TICK_MS = 90
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -38,7 +39,10 @@ const Rows: ClientModule<RowsProps, Local> = (props, surface) => {
     state.ref.stop()
     state.ref.stop = undefined
   }
-  surface.onPointer(e => {
+  if (props.pointer === false) {
+    state.ref.unpoint?.()
+    state.ref.unpoint = undefined
+  } else state.ref.unpoint = surface.onPointer(e => {
     const cur = surface.state ?? state
     if (e.type === 'leave' || e.y < 0 || e.y >= props.rows.length) {
       if (cur.hover !== -1) surface.setState({ ...cur, hover: -1 })

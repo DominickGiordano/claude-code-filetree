@@ -64,6 +64,7 @@ let showReads = true
 let showWrites = true
 let searchIndex: { root: string; paths: Promise<string[]> } | null = null
 let activityId = 0
+let pointer = true
 
 function clean(segs: Seg[]): Seg[] {
   for (const seg of segs) for (const k of Object.keys(seg) as (keyof Seg)[]) if (seg[k] === undefined) delete seg[k]
@@ -512,6 +513,17 @@ async function fontState($: EngineInterface, charset: string): Promise<'ok' | 's
   }
 }
 
+async function finePointerOk($: EngineInterface): Promise<boolean> {
+  if (!(await $.env.get('HERDR_ENV'))) return true
+  try {
+    const out = (await $.process.run([(await $.env.get('HERDR_BIN_PATH')) || 'herdr', '--version'], { timeoutMs: 3_000 })).stdout
+    const [major = 0, minor = 0, fix = 0] = (/(\d+)\.(\d+)\.(\d+)/.exec(out) ?? []).slice(1).map(Number)
+    return major * 1e6 + minor * 1e3 + fix >= 9_001
+  } catch {
+    return false
+  }
+}
+
 async function launch($: EngineInterface, argv: string[]): Promise<void> {
   try {
     await $.process.run(['setsid', '-f', ...argv], { timeoutMs: 10_000 })
@@ -559,6 +571,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'filetree', description: 'Show the file tree; args: [path] (no path = cwd)' })
     void (async () => {
+      pointer = await finePointerOk($)
       try {
         const remote = Boolean((await $.env.get('SSH_CONNECTION')) || (await $.env.get('SSH_TTY')))
         noNerd = !remote && (await fontState($, 'f04eb')) !== 'ok'
@@ -907,7 +920,7 @@ export const register: Register = (on, options) => {
         <Client
           key="rows"
           module="./rows.tsx"
-          props={{ rows: specs, active: t.cursor, activeBg: theme.selection, hoverBg: lighten(theme.selection), tones: SHIMMER } satisfies RowsProps}
+          props={{ rows: specs, active: t.cursor, activeBg: theme.selection, hoverBg: lighten(theme.selection), tones: SHIMMER, pointer } satisfies RowsProps}
         />
         <Box flexGrow={1} />
         {(t.selected || latest) && (
