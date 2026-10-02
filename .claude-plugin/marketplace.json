@@ -1,10 +1,10 @@
 {
-  "name": "claude-code-filetree",
+  "name": "filetree-context-map",
   "owner": {
-    "name": "Kurt Buhler"
+    "name": "Dominick Giordano"
   },
   "metadata": {
-    "description": "An IDE-style file tree for Claude Code that shows what Claude is doing and where in files"
+    "description": "Fork of data-goblin/claude-code-filetree with a context map: what is in context, who touched it, and actions on the selected file"
   },
   "plugins": [
     {

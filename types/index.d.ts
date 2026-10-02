@@ -50,6 +50,21 @@ export type FileTree = {
   scroll: number | null
 }
 
+export type Act = 'read' | 'edited' | 'wrote' | 'changed' | 'committed'
+
+export type Touch = {
+  line: number
+  tokens: number
+  live: boolean
+  by: Record<string, Partial<Record<Act, number>>>
+}
+
+export type ContextMap = {
+  files: Record<string, Touch>
+  agents: Record<string, string>
+  filter: 'all' | 'context' | 'touched'
+}
+
 export type Theme = {
   fg: string
   accent: string
@@ -64,6 +79,7 @@ declare module 'claude-code' {
       tree: FileTree
       theme: Theme
       activity: Activity[]
+      context: ContextMap
     }
   }
 }

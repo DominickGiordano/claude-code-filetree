@@ -259,7 +259,7 @@ export function ancestorsOf(id: string, root: string): string[] {
   return out
 }
 
-export function visibleRows(t: FileTree): Row[] {
+export function visibleRows(t: FileTree, only?: Set<string>): Row[] {
   const kids = new Map<string, FileNode[]>()
   for (const n of t.nodes) {
     if (!t.showHidden && n.hidden) continue
@@ -269,10 +269,11 @@ export function visibleRows(t: FileTree): Row[] {
   }
   const q = t.query.trim().toLowerCase()
   let keep: Set<string> | null = null
-  if (q) {
+  if (q || only) {
     keep = new Set()
     for (const n of t.nodes) {
-      if (!n.name.toLowerCase().includes(q)) continue
+      if (q && !n.name.toLowerCase().includes(q)) continue
+      if (only && !only.has(n.id)) continue
       keep.add(n.id)
       for (const a of ancestorsOf(n.id, t.root)) keep.add(a)
     }

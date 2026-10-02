@@ -1,12 +1,12 @@
 {
   "name": "filetree",
-  "version": "0.2.14",
+  "version": "0.4.0",
   "description": "An IDE-style file tree for Claude Code that shows what Claude is doing and where in files",
   "types": "./types/index.d.ts",
   "author": {
     "name": "Kurt Buhler"
   },
-  "repository": "https://github.com/data-goblin/claude-code-filetree",
+  "repository": "https://github.com/DominickGiordano/claude-code-filetree",
   "keywords": [
     "file-tree",
     "git",
@@ -36,6 +36,12 @@
         "nerd",
         "plain"
       ]
+    },
+    "editor": {
+      "type": "string",
+      "title": "Editor",
+      "description": "Command the open-in-editor action runs: auto runs code -g path:line and falls back to the default app; otherwise a command line where {path} and {line} are filled in (zed {path}:{line}), or the path is appended",
+      "default": "auto"
     }
   },
   "license": "MIT"
