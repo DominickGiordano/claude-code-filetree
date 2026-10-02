@@ -1,6 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-type World = { os: 'darwin' | 'linux' | 'win32'; env: Record<string, string>; cwd: string; top: string; dirs: Record<string, [string, 'file' | 'dir'][]>; status: string; numstat: string; missing?: string[] }
+import { attribute } from '../hooks/context'
+
+type World = { os: 'darwin' | 'linux' | 'win32'; env: Record<string, string>; cwd: string; top: string; dirs: Record<string, [string, 'file' | 'dir'][]>; status: string; numstat: string }
 type Ran = string[][]
 const opens: unknown[] = []
 
@@ -41,7 +43,6 @@ function world(on: any, w: World, ran: Ran) {
   on('process.run', (_$: any, e: any) => {
     const argv: string[] = [...e.argv]
     ran.push(argv)
-    if (w.missing?.includes(argv[0] ?? '')) throw new Error(`spawn ${argv[0]} ENOENT`)
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (argv[0] === 'uname') return ok(w.os === 'darwin' ? 'Darwin\n' : 'Linux\n')
     if (argv[0] === 'sh') return ok('missing\n')
@@ -333,11 +334,19 @@ test('sidebar only: no pane in the default layout, and an inline pane closes its
   await ui.unmount()
 })
 
-function contextWorld(on: any, ran: Ran, root: string, w: Partial<World> = {}) {
+type Shell = { found: string[]; codeMissing: boolean }
+
+function contextWorld(on: any, ran: Ran, root: string, w: Partial<World> = {}, shell: Shell = { found: [], codeMissing: false }) {
   on('tool.call', { tool: ['Read', 'Edit', 'Write'] }, (_$: any, e: any) => {
     if (e.tool === 'Read') return { result: { type: 'text', file: { filePath: e.file_path, content: '', numLines: 1, startLine: 1, totalLines: 1 } }, text: 'x'.repeat(e.file_path.endsWith('a.ts') ? 4000 : 2400) }
     return { result: { filePath: e.file_path, structuredPatch: [{ newStart: 12 }] }, text: 'updated' }
   })
+  on('process.run', { argv: ['find', 'code'] }, (_$: any, e: any) => {
+    ran.push([...e.argv])
+    if (e.argv[0] === 'code' && shell.codeMissing) throw new Error('spawn code ENOENT')
+    return { value: { exitCode: 0, stdout: e.argv[0] === 'find' ? shell.found.join('\n') : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('ui.log', () => ({}))
   return world(on, {
     os: 'darwin', env: { HOME: '/Users/k' }, cwd: root, top: '',
     dirs: { [root]: [['src', 'dir'], ['README.md', 'file']], [`${root}/src`]: [['a.ts', 'file'], ['b.ts', 'file']] },
@@ -346,43 +355,44 @@ function contextWorld(on: any, ran: Ran, root: string, w: Partial<World> = {}) {
 }
 
 const rowsOf = async (ui: any) => ((await ui.drawn()) as any).children.find((c: any) => c.type === 'Client').props.props
+const drawnText = async (ui: any) => JSON.stringify(await ui.drawn())
 
-test('context map: weights per file and folder, reset on compact and /clear', { timeoutMs: 20_000 }, async ($, on) => {
-  const ran: Ran = []
-  const root = '/Users/k/ctx'
-  const clock = contextWorld(on, ran, root)
-  on('session.compact', () => ({ messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
-  on('session.end', () => ({ sessionId: 'test-session' }))
-  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
-  await clock.settle()
-  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(80) })
-  await $.tool.call({ tool: 'Read', file_path: `${root}/src/a.ts` } as any)
-  await $.tool.call({ tool: 'Edit', file_path: `${root}/src/b.ts`, old_string: 'a'.repeat(100), new_string: 'b'.repeat(93) } as any)
-  await clock.settle()
-  const weightOf = async (id: string) => (await rowsOf(ui)).rows.find((r: any) => r.id === id)?.right.find((s: any) => s.t.startsWith(' · '))?.t
-  expect(await weightOf(`${root}/src/a.ts`)).toBe(' · 1k')
-  expect(await weightOf(`${root}/src/b.ts`)).toBe(' · 50')
-  expect(await weightOf(`${root}/src`)).toBe(' · 1.1k')
-  expect(await weightOf(`${root}/README.md`)).toBeUndefined()
-  expect(JSON.stringify(await ui.drawn())).toContain('≈1.1k')
-  await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'hi', toolUses: [] }] } as any)
-  await clock.settle()
-  expect(await weightOf(`${root}/src/a.ts`)).toBeUndefined()
-  expect(JSON.stringify(await ui.drawn())).not.toContain('≈')
-  await ui.press({ key: 'filter' })
-  await clock.settle()
-  expect(JSON.stringify(await rowsOf(ui))).toContain('nothing in context')
-  await $.tool.call({ tool: 'Read', file_path: `${root}/README.md` } as any)
-  await clock.settle()
-  const live = (await rowsOf(ui)).rows.map((r: any) => r.id)
-  expect(live).toEqual([`${root}/README.md`])
-  await $.session.end({ reason: 'clear', sessionId: 'test-session', resume: {} } as any)
-  await clock.settle()
-  expect(JSON.stringify(await rowsOf(ui))).toContain('nothing in context')
-  await ui.unmount()
-})
+for (const reason of ['clear', 'resume'] as const) {
+  test(`context map: weights per file and folder, reset on compact and on ${reason}`, { timeoutMs: 20_000 }, async ($, on) => {
+    const ran: Ran = []
+    const root = '/Users/k/ctx'
+    const clock = contextWorld(on, ran, root)
+    on('session.compact', () => ({ messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
+    on('session.end', () => ({ sessionId: 'test-session' }))
+    await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+    await clock.settle()
+    const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(80) })
+    await $.tool.call({ tool: 'Read', file_path: `${root}/src/a.ts` } as any)
+    await $.tool.call({ tool: 'Edit', file_path: `${root}/src/b.ts`, old_string: 'a'.repeat(100), new_string: 'b'.repeat(93) } as any)
+    await clock.settle()
+    const weightOf = async (id: string) => (await rowsOf(ui)).rows.find((r: any) => r.id === id)?.right.find((s: any) => s.t.startsWith(' · '))?.t
+    expect(await weightOf(`${root}/src/a.ts`)).toBe(' · 1k')
+    expect(await weightOf(`${root}/src/b.ts`)).toBe(' · 50')
+    expect(await weightOf(`${root}/src`)).toBe(' · 1.1k')
+    expect(await weightOf(`${root}/README.md`)).toBeUndefined()
+    expect(await drawnText(ui)).toContain('≈1.1k')
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'hi', toolUses: [] }] } as any)
+    await clock.settle()
+    expect(await weightOf(`${root}/src/a.ts`)).toBeUndefined()
+    expect(await drawnText(ui)).not.toContain('≈1')
+    await ui.press({ key: 'filter' })
+    expect(JSON.stringify(await rowsOf(ui))).toContain('nothing ≈ in context')
+    await $.tool.call({ tool: 'Read', file_path: `${root}/README.md` } as any)
+    await clock.settle()
+    expect((await rowsOf(ui)).rows.map((r: any) => r.id)).toEqual([`${root}/README.md`])
+    await $.session.end({ reason, sessionId: 'test-session', resume: {} } as any)
+    await clock.settle()
+    expect(JSON.stringify(await rowsOf(ui))).toContain('nothing ≈ in context')
+    await ui.unmount()
+  })
+}
 
-test('context map: touched filter keeps reads, writes and commits; detail names the subagent', { timeoutMs: 20_000 }, async ($, on) => {
+test('context map: touched filter keeps reads and writes; detail names the subagent', { timeoutMs: 20_000 }, async ($, on) => {
   const ran: Ran = []
   const root = '/Users/k/ctx'
   const clock = contextWorld(on, ran, root)
@@ -395,28 +405,154 @@ test('context map: touched filter keeps reads, writes and commits; detail names 
   await $.tool.call({ tool: 'Edit', file_path: `${root}/src/a.ts`, old_string: 'a', new_string: 'b', agentId: 'agent-1' } as any)
   await $.tool.call({ tool: 'Read', file_path: `${root}/src/b.ts`, agentId: 'agent-2' } as any)
   await clock.settle()
-  expect(await rowsOf(ui).then(p => JSON.stringify(p.rows))).not.toContain(' · ')
+  expect(JSON.stringify((await rowsOf(ui)).rows)).not.toContain(' · ')
   await ui.press({ key: 'filter' })
   await ui.press({ key: 'filter' })
-  await clock.settle()
   expect((await rowsOf(ui)).rows.map((r: any) => r.id)).toEqual([`${root}/src`, `${root}/src/a.ts`, `${root}/src/b.ts`])
   await clock.advance(120_000)
   await ui.post({ press: `${root}/src/a.ts` }, { in: 'rows' })
-  expect(JSON.stringify(await ui.drawn())).toContain('edited by Explore · 2m ago')
+  expect(await drawnText(ui)).toContain('"src/a.ts · edited by Explore 2m ago"')
   await ui.post({ press: `${root}/src/b.ts` }, { in: 'rows' })
-  expect(JSON.stringify(await ui.drawn())).toContain('read by Plan · 2m ago')
+  expect(await drawnText(ui)).toContain('"src/b.ts · read by Plan 2m ago"')
   await ui.press({ key: 'filter' })
-  await clock.settle()
   expect(JSON.stringify(await rowsOf(ui))).toContain('README.md')
+  await ui.unmount()
+})
+
+test('context map: history keeps every reader, so in context (main) survives a subagent read', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/ctx'
+  const clock = contextWorld(on, ran, root)
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(80) })
+  await $.agent.spawn({ prompt: 'look around', subagentType: 'Explore', description: 'look' } as any)
+  await $.tool.call({ tool: 'Read', file_path: `${root}/src/a.ts` } as any)
+  await clock.advance(60_000)
+  await $.tool.call({ tool: 'Read', file_path: `${root}/src/a.ts`, agentId: 'agent-1' } as any)
+  await clock.settle()
+  await ui.post({ press: `${root}/src/a.ts` }, { in: 'rows' })
+  expect(await drawnText(ui)).toContain('"src/a.ts · ≈1k in context (main) · read by Explore 0s ago · read by main 1m ago"')
+  await ui.unmount()
+})
+
+test('context map: a subagent sed -i beside a main Edit credits each to its own author', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/ctx'
+  let release = () => {}
+  const gate = new Promise<void>(r => (release = r))
+  on('tool.call', { tool: 'Bash' }, async () => {
+    await gate
+    return { result: { stdout: '', stderr: '' } }
+  })
+  const shell = { found: [`${root}/src/a.ts`, `${root}/src/b.ts`], codeMissing: false }
+  const clock = contextWorld(on, ran, root, {}, shell)
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(80) })
+  await $.agent.spawn({ prompt: 'fix a.ts', subagentType: 'Explore', description: 'fix' } as any)
+  const bash = $.tool.call({ tool: 'Bash', command: 'sed -i "" s/x/y/ src/a.ts', agentId: 'agent-1' } as any)
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/src/b.ts`, old_string: 'a', new_string: 'b' } as any)
+  release()
+  await bash
+  await clock.settle()
+  await ui.post({ press: `${root}/src/b.ts` }, { in: 'rows' })
+  const b = await drawnText(ui)
+  expect(b).toContain('"src/b.ts · ≈3 in context (main) · edited by main 0s ago"')
+  await ui.post({ press: `${root}/src/a.ts` }, { in: 'rows' })
+  expect(await drawnText(ui)).toContain('"src/a.ts · changed by Explore 0s ago"')
+  await ui.unmount()
+})
+
+test('context map: Bash changes keep the line Claude last edited', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/ctx'
+  const shell = { found: [] as string[], codeMissing: false }
+  const clock = contextWorld(on, ran, root, {}, shell)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(80) })
+  await $.tool.call({ tool: 'Edit', file_path: `${root}/src/a.ts`, old_string: 'a', new_string: 'b' } as any)
+  await clock.settle()
+  shell.found = [`${root}/src/a.ts`]
+  await clock.advance(1_000)
+  await $.tool.call({ tool: 'Bash', command: 'sed -i "" s/x/y/ src/a.ts' } as any)
+  await clock.settle()
+  shell.found = []
+  await clock.advance(1_000)
+  await $.tool.call({ tool: 'Bash', command: 'cat src/a.ts' } as any)
+  await clock.settle()
+  await ui.post({ press: `${root}/src/a.ts` }, { in: 'rows' })
+  expect(await drawnText(ui)).toContain('read+changed+edited by main 0s ago')
+  await ui.press({ key: 'editor' })
+  expect(ran).toContainEqual(['code', '-g', `${root}/src/a.ts:12`])
+  await ui.unmount()
+})
+
+test('empty states name their cause', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/dots'
+  const clock = contextWorld(on, ran, root, { dirs: { [root]: [['.env', 'file'], ['.zshrc', 'file']] } })
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(80) })
+  await clock.settle()
+  const note = async () => (await rowsOf(ui)).rows[0].left[0].t
+  await ui.input({ key: 'q', text: 'zzz', kind: 'change' })
+  expect(await note()).toBe('no matches for "zzz"')
+  await ui.press({ key: 'clear' })
+  await ui.press({ key: 'filter' })
+  expect(await note()).toBe('nothing ≈ in context')
+  await $.tool.call({ tool: 'Read', file_path: `${root}/.env` } as any)
+  await clock.settle()
+  await ui.input({ key: 'q', text: 'zzz', kind: 'change' })
+  expect(await note()).toBe('no matches for "zzz" among files ≈ in context')
+  await ui.press({ key: 'clear' })
+  await ui.press({ key: 'hidden' })
+  expect(await note()).toBe('files ≈ in context are hidden; show hidden to see them')
+  await ui.press({ key: 'filter' })
+  await ui.press({ key: 'filter' })
+  expect(await note()).toBe('only hidden files here; show hidden to see them')
+  await ui.unmount()
+})
+
+test('a filter that hides the selected file clears it; buttons and keys act on the same row', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/ctx'
+  const clock = contextWorld(on, ran, root)
+  const fills: string[] = []
+  on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+  on('prompt.fill', (_$: any, e: any) => {
+    fills.push(e.text)
+    return { isFilled: true }
+  })
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(80) })
+  await $.tool.call({ tool: 'Read', file_path: `${root}/src/a.ts` } as any)
+  await clock.settle()
+  await ui.post({ press: `${root}/README.md` }, { in: 'rows' })
+  expect(await ui.find({ key: 'unselect' })).toBeDefined()
+  await ui.press({ key: 'filter' })
+  expect(await ui.find({ key: 'unselect' })).toBeUndefined()
+  expect((await rowsOf(ui)).active).toBe(`${root}/src`)
+  await ui.press({ key: 'mention' })
+  await ui.post({ key: 'm' }, { in: 'rows' })
+  expect(fills).toEqual(['@src ', '@src '])
+  const sent = await $.prompt.submit({ text: 'what is this?', wait: false } as any)
+  expect(JSON.stringify(sent)).not.toContain('README.md')
   await ui.unmount()
 })
 
 test('@ mention fills the prompt draft at the cursor without submitting', { timeoutMs: 20_000 }, async ($, on) => {
   const ran: Ran = []
   const root = '/Users/k/ctx'
-  const clock = contextWorld(on, ran, root)
+  const clock = contextWorld(on, ran, root, { dirs: { [root]: [['my notes.md', 'file'], ['README.md', 'file']] } })
   const fills: any[] = []
-  on('prompt.read', () => ({ value: { text: 'explain', cursor: 7 } }))
+  let box = { text: 'explain', cursor: 7 }
+  on('prompt.read', () => ({ value: box }))
   on('prompt.fill', (_$: any, e: any) => {
     fills.push(e)
     return { isFilled: true }
@@ -427,17 +563,18 @@ test('@ mention fills the prompt draft at the cursor without submitting', { time
   await clock.settle()
   await ui.post({ press: `${root}/README.md` }, { in: 'rows' })
   await ui.press({ key: 'mention' })
-  expect(fills.map(f => [f.text, f.mode])).toEqual([[' @README.md ', 'insert']])
+  box = { text: 'see  and', cursor: 4 }
+  await ui.post({ press: `${root}/my notes.md` }, { in: 'rows' })
   await ui.post({ key: '@' }, { in: 'rows' })
-  expect(fills).toHaveLength(2)
+  expect(fills.map(f => [f.text, f.mode])).toEqual([[' @README.md ', 'insert'], ['@"my notes.md"', 'insert']])
   await ui.unmount()
 })
 
 test('open in editor: code -g path:line by default, falls back to open when code is missing', { timeoutMs: 20_000 }, async ($, on) => {
   const ran: Ran = []
   const root = '/Users/k/ctx'
-  const missing: string[] = []
-  const clock = contextWorld(on, ran, root, { missing })
+  const shell = { found: [] as string[], codeMissing: false }
+  const clock = contextWorld(on, ran, root, {}, shell)
   await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
   await clock.settle()
   const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(80) })
@@ -446,7 +583,7 @@ test('open in editor: code -g path:line by default, falls back to open when code
   await ui.post({ press: `${root}/src/a.ts` }, { in: 'rows' })
   await ui.press({ key: 'editor' })
   expect(ran).toContainEqual(['code', '-g', `${root}/src/a.ts:12`])
-  missing.push('code')
+  shell.codeMissing = true
   await ui.post({ key: 'e' }, { in: 'rows' })
   const [tried, toast, opened] = ran.slice(-3)
   expect(tried).toEqual(['code', '-g', `${root}/src/a.ts:12`])
@@ -468,4 +605,29 @@ test('open in editor: a configured command fills {path} and {line}', { timeoutMs
   await ui.press({ key: 'editor' })
   expect(ran).toContainEqual(['zed', `${root}/README.md:40`])
   await ui.unmount()
+})
+
+test('weight falls back to the serialized result when the engine sends no text', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/Users/k/ctx'
+  const result = { type: 'text', file: { filePath: `${root}/README.md`, content: 'y'.repeat(3900), numLines: 1, startLine: 1, totalLines: 1 } }
+  on('tool.call', { tool: 'Read' }, () => ({ result }))
+  const clock = contextWorld(on, ran, root)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'terminal', component: 'Pane', requestId: 'filetree', props: paneProps(80) })
+  await $.tool.call({ tool: 'Read', file_path: `${root}/README.md` } as any)
+  await clock.settle()
+  const expected = Math.ceil(JSON.stringify(result).length / 4)
+  const row = (await rowsOf(ui)).rows.find((r: any) => r.id === `${root}/README.md`)
+  expect(row.right.find((s: any) => s.t.startsWith(' · '))?.t).toBe(` · ${(expected / 1000).toFixed(1).replace(/\.0$/, '')}k`)
+  await ui.unmount()
+})
+
+test('batched shell writes go to the command that names the file, else to "shell"', async () => {
+  const writers = [{ command: 'sed -i s/a/b/ src/a.ts', since: 10 }, { command: 'npm run build', since: 12 }]
+  const files = { '/r/src/c.ts': { line: 1, tokens: 0, live: false, by: { main: { edited: 15 } } } }
+  const owners = attribute(['/r/src/a.ts', '/r/dist/out.js', '/r/src/c.ts'], writers, files)
+  expect([...owners]).toEqual([['/r/src/a.ts', 0], ['/r/dist/out.js', -1]])
+  expect([...attribute(['/r/dist/out.js'], [writers[1]!], {})]).toEqual([['/r/dist/out.js', 0]])
 })

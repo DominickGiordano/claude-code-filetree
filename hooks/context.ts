@@ -1,4 +1,4 @@
-import type { ContextMap, Touch } from '../types'
+import type { Act, ContextMap, FileTree, Touch } from '../types'
 import { dirname, inside } from './tree'
 
 const CHARS_PER_TOKEN = 4
@@ -32,11 +32,31 @@ export function lineOf(tool: string, input: object, result: unknown): number {
   return (result as { structuredPatch?: { newStart?: number }[] } | undefined)?.structuredPatch?.[0]?.newStart || 1
 }
 
-export function noted(files: Record<string, Touch>, paths: string[], touch: Omit<Touch, 'tokens' | 'live'>, tokens: number, live: boolean): Record<string, Touch> {
+export function noted(files: Record<string, Touch>, paths: string[], actor: string, how: Act, at: number, line: number | undefined, tokens: number, live: boolean): Record<string, Touch> {
   const out = { ...files }
   for (const p of paths) {
     const prev = out[p]
-    out[p] = { ...touch, tokens: (prev?.live ? prev.tokens : 0) + (live ? tokens : 0), live: Boolean(prev?.live) || live }
+    out[p] = {
+      line: line ?? prev?.line ?? 1,
+      tokens: (prev?.live ? prev.tokens : 0) + (live ? tokens : 0),
+      live: Boolean(prev?.live) || live,
+      by: { ...prev?.by, [actor]: { ...prev?.by?.[actor], [how]: at } },
+    }
+  }
+  return out
+}
+
+export type Writer = { command: string; since: number }
+
+export function attribute(hits: string[], writers: Writer[], files: Record<string, Touch>): Map<string, number> {
+  const out = new Map<string, number>()
+  const since = Math.min(...writers.map(w => w.since))
+  for (const p of hits) {
+    const base = p.slice(p.lastIndexOf('/') + 1)
+    const named = writers.flatMap((w, i) => (w.command.includes(base) ? [i] : []))
+    if (named.length === 1) out.set(p, named[0] ?? -1)
+    else if (Object.values(files[p]?.by ?? {}).some(h => Math.max(h.edited ?? 0, h.wrote ?? 0) >= since)) continue
+    else out.set(p, writers.length === 1 ? 0 : -1)
   }
   return out
 }
@@ -75,8 +95,28 @@ export function ago(ms: number): string {
   return `${Math.floor(s / 3600)}h ago`
 }
 
-export function detail(f: Touch, now: number): string {
-  return `${f.how} by ${f.by} · ${ago(now - f.at)}${f.live ? ` · ≈${weight(f.tokens)} in context` : ''}`
+export function detail(name: string, f: Touch, now: number): string {
+  const acts = Object.entries(f.by ?? {})
+    .map(([who, hows]) => {
+      const recent = (Object.entries(hows) as [Act, number][]).sort((a, b) => b[1] - a[1])
+      const at = recent[0]?.[1] ?? 0
+      return { at, text: `${recent.map(([how]) => how).join('+')} by ${who} ${ago(now - at)}` }
+    })
+    .sort((a, b) => b.at - a.at)
+  return [name, ...(f.live ? [`≈${weight(f.tokens)} in context (main)`] : []), ...acts.map(a => a.text)].join(' · ')
+}
+
+export function emptyNote(t: FileTree, c: ContextMap): string {
+  const q = t.query.trim()
+  const scope = c.filter === 'context' ? '≈ in context' : 'touched this session'
+  if (q) return c.filter === 'all' ? `no matches for "${q}"` : `no matches for "${q}" among files ${scope}`
+  if (c.filter === 'all') return !t.showHidden && t.nodes.some(n => n.parent === t.root && n.hidden) ? 'only hidden files here; show hidden to see them' : 'empty'
+  const only = [...(onlyShown(c) ?? [])]
+  if (only.length === 0) return c.filter === 'context' ? 'nothing ≈ in context' : 'nothing touched this session'
+  const here = only.filter(p => p !== t.root && inside(t.root, p))
+  if (here.length === 0) return `${only.length} ${scope}, all outside this folder`
+  if (!t.showHidden && here.some(p => p.slice(t.root.length).split('/').some(seg => seg.startsWith('.')))) return `files ${scope} are hidden; show hidden to see them`
+  return `${here.length} ${scope}, none in the tree (deleted or not loaded)`
 }
 
 export function editorArgv(setting: string, path: string, line: number): string[] {
@@ -86,8 +126,8 @@ export function editorArgv(setting: string, path: string, line: number): string[
   return [...words, path]
 }
 
-export function mentionText(path: string, cwd: string, before: string): string {
+export function mentionText(path: string, cwd: string, before: string, after: string): string {
   const rel = path !== cwd && inside(cwd, path) ? path.slice(cwd.endsWith('/') ? cwd.length : cwd.length + 1) : path
-  const ref = /\s/.test(rel) ? `@"${rel}"` : `@${rel}`
-  return `${before && !/\s$/.test(before) ? ' ' : ''}${ref} `
+  const ref = /[\s"'`]/.test(rel) ? `@"${rel.replace(/["\\]/g, '\\$&')}"` : `@${rel}`
+  return `${before && !/\s$/.test(before) ? ' ' : ''}${ref}${/^\s/.test(after) ? '' : ' '}`
 }

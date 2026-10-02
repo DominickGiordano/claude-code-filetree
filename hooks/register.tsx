@@ -1,7 +1,7 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Activity, ContextMap, FileNode, FileTree, Theme, Touch } from '../types'
-import { detail, editorArgv, emptyContext, field, FILTERS, forgotten, lineOf, mentionText, noted, onlyShown, rollWeights, weigh, weight } from './context'
+import type { Act, Activity, ContextMap, FileNode, FileTree, Theme } from '../types'
+import { attribute, detail, editorArgv, emptyContext, emptyNote, field, FILTERS, forgotten, lineOf, mentionText, noted, onlyShown, rollWeights, weigh, weight } from './context'
 import { BRANCH_ICON, type GitAction, gitActions, readOnly, readTargets, resolve, TONES } from './git'
 import type { RowSpec, RowsProps, Seg } from './rows'
 import { CHEVRON_CLOSED, CHEVRON_OPEN, fileIcon, GIT_COLOR } from './icons'
@@ -153,21 +153,26 @@ async function putContext($: EngineInterface, fn: (c: ContextMap) => Partial<Con
   }
 }
 
-async function who($: EngineInterface, agentId: string | undefined): Promise<string> {
+async function who($: EngineInterface, agentId: string | undefined | null): Promise<string> {
+  if (agentId === null) return 'shell'
   if (!agentId) return 'main'
   const known = (await contextOf($)).agents[agentId]
   if (known) return known
   try {
-    return (await $.agent.list()).find(a => a.id === agentId)?.type ?? 'subagent'
-  } catch {
-    return 'subagent'
+    const type = (await $.agent.list()).find(a => a.id === agentId)?.type
+    if (type) return type
+    $.ui.log(`filetree: agent ${agentId} is neither spawned through agent.spawn nor in $.agent.list(); shown as "subagent"`, { to: 'debug' })
+  } catch (err) {
+    $.ui.log(`filetree: $.agent.list() failed for agent ${agentId} (${err instanceof Error ? err.message : String(err)}); shown as "subagent"`, { to: 'debug' })
   }
+  return 'subagent'
 }
 
-async function recordTouch($: EngineInterface, paths: string[], how: Touch['how'], agentId: string | undefined, line = 1, tokens = 0): Promise<void> {
+async function recordTouch($: EngineInterface, paths: string[], how: Act, agentId: string | undefined | null, line?: number, tokens = 0): Promise<void> {
   if (paths.length === 0) return
-  const touch = { how, by: await who($, agentId), at: await $.clock.now(), line }
-  await putContext($, c => ({ files: noted(c.files, paths, touch, tokens, !agentId && how !== 'committed' && tokens > 0) }))
+  const actor = await who($, agentId)
+  const at = await $.clock.now()
+  await putContext($, c => ({ files: noted(c.files, paths, actor, how, at, line, tokens, agentId === undefined && how !== 'committed' && tokens > 0) }))
 }
 
 async function list($: EngineInterface, dir: string): Promise<FileNode[]> {
@@ -433,7 +438,7 @@ async function followCwd($: EngineInterface): Promise<boolean> {
 }
 
 type Pending = { actions: GitAction[]; ids: number[] }
-type Job = { p: Pending | null; since: Since; initRepo: boolean; readOnly: boolean; agent?: string }
+type Job = { p: Pending | null; since: Since; initRepo: boolean; readOnly: boolean; agent?: string; command?: string; reads?: string[] }
 
 async function startGit($: EngineInterface, actions: GitAction[]): Promise<number[]> {
   const now = await $.clock.now()
@@ -545,7 +550,6 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
   const writers = jobs.filter(j => !j.readOnly)
   const since = (writers.length ? writers : jobs).reduce((a, j) => (j.since.ms < a.ms ? j.since : a), (writers[0] ?? jobs[0])?.since ?? { ms: 0, mark: '', os: 'linux' as const })
   const writes = !jobs.every(j => j.readOnly)
-  const by = (jobs.find(j => !j.readOnly) ?? jobs[0])?.agent
   const before = dirty.root === t.root ? dirty.files : {}
   if (jobs.some(j => j.initRepo)) await detectRepo($)
   else if (!t.top && (await exists($, join(t.root, '.git')))) await detectRepo($)
@@ -569,11 +573,13 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
       return { expanded: cur.expanded.filter(id => ids.has(id)) }
     })
     const present = new Set((await get($)).nodes.map(n => n.id))
-    await recordTouch($, hits, 'wrote', by)
+    const owners = attribute(hits, writers.map(j => ({ command: j.command ?? '', since: j.since.ms })), (await contextOf($)).files)
+    await recordTouch($, hits.filter(h => owners.get(h) === -1), 'changed', null)
+    for (const [i, j] of writers.entries()) await recordTouch($, hits.filter(h => owners.get(h) === i), 'changed', j.agent)
     const touchTone = actions.find(a => !['commit', 'push', 'add'].includes(a.verb))?.tone ?? 'orange'
     if (showWrites) for (const id of hits) if (present.has(id)) tones[id] = touchTone
   }
-  await recordTouch($, reads.filter(r => r !== t.root && inside(t.root, r) && !underAny(r, ignored, t.root)), 'read', by)
+  for (const j of jobs) await recordTouch($, (j.reads ?? []).filter(r => r !== t.root && inside(t.root, r) && !underAny(r, ignored, t.root)), 'read', j.agent)
   if (showReads) {
     const found: string[] = []
     for (const r of reads) {
@@ -591,7 +597,8 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
     const committed = actions.some(a => a.verb === 'commit')
     if ((committed || actions.some(a => a.verb === 'add')) && final.top) {
       const all = (await gitPaths($, final.root, final.prefix, committed)).filter(x => !underAny(x, ignored, final.root))
-      if (committed) await recordTouch($, all, 'committed', by)
+      const committers = jobs.filter(j => j.p?.actions.some(a => a.verb === 'commit'))
+      if (committed) await recordTouch($, all, 'committed', committers.length === 1 ? committers[0]?.agent : null)
       const paths = showWrites ? all.slice(0, READ_REVEAL_LIMIT) : []
       await revealPaths($, paths)
       const shown = new Set((await get($)).nodes.map(n => n.id))
@@ -779,12 +786,20 @@ async function openNode($: EngineInterface, n: FileNode): Promise<void> {
   } else await openFile($, n.id)
 }
 
-async function cycleFilter($: EngineInterface): Promise<void> {
+async function fitSelection($: EngineInterface): Promise<void> {
   const c = await contextOf($)
-  const filter = FILTERS[(FILTERS.indexOf(c.filter) + 1) % FILTERS.length] ?? 'all'
-  await putContext($, () => ({ filter }))
-  await revealPaths($, [...(onlyShown({ ...c, filter }) ?? [])])
-  await patch($, () => ({ scroll: null }))
+  const t = await get($)
+  await revealPaths($, [...(onlyShown(c) ?? [])].filter(p => p !== t.root && inside(t.root, p)).slice(0, SEARCH_REVEAL_LIMIT))
+  await patch($, cur => {
+    const rows = visibleRows(cur, onlyShown(c))
+    const ids = new Set(rows.map(r => r.node.id))
+    return { scroll: null, selected: ids.has(cur.selected) ? cur.selected : '', cursor: ids.has(cur.cursor) ? cur.cursor : (rows[0]?.node.id ?? '') }
+  })
+}
+
+async function cycleFilter($: EngineInterface): Promise<void> {
+  await putContext($, c => ({ filter: FILTERS[(FILTERS.indexOf(c.filter) + 1) % FILTERS.length] ?? 'all' }))
+  await fitSelection($)
 }
 
 async function openInEditor($: EngineInterface, path: string): Promise<void> {
@@ -807,7 +822,7 @@ async function openInEditor($: EngineInterface, path: string): Promise<void> {
 
 async function mention($: EngineInterface, path: string): Promise<void> {
   const box = await $.prompt.read()
-  const text = mentionText(path, await cwdOf($), box.text.slice(0, box.cursor))
+  const text = mentionText(path, await cwdOf($), box.text.slice(0, box.cursor), box.text.slice(box.cursor))
   const filled = await $.prompt.fill({ text, mode: 'insert' })
   if (!filled.isFilled) $.ui.toast(filled.refusal === 'dialog' ? `Close the dialog, then mention ${text.trim()}` : `Could not put ${text.trim()} in the prompt`)
 }
@@ -890,8 +905,9 @@ export const register: Register = (on, options) => {
     }
     if (e.tool === 'Bash') {
       const stdout = result.result && typeof result.result === 'object' && 'stdout' in result.result ? String(result.result.stdout) : ''
-      queuedReads.push(...readTargets(command, cwd, stdout, home))
-      scheduleScan($, { p: pending, since, initRepo: actions.some(a => a.init), readOnly: quiet, agent: e.agentId })
+      const reads = readTargets(command, cwd, stdout, home)
+      if (showReads) queuedReads.push(...reads)
+      scheduleScan($, { p: pending, since, initRepo: actions.some(a => a.init), readOnly: quiet, agent: e.agentId, command, reads })
       if (follow && /(^|[;&|\s])(cd|pushd|popd)(\s|$)/.test(command)) $.clock.after(400, () => void followCwd($))
     } else {
       const file =
@@ -929,12 +945,14 @@ export const register: Register = (on, options) => {
 
   on('session.compact', async ($, e, next) => {
     const r = await next(e)
-    if (!e.agentId && e.trigger !== 'precompute' && !r.skip) await putContext($, c => ({ files: forgotten(c.files) }))
+    if (e.agentId || e.trigger === 'precompute' || r.skip) return r
+    await putContext($, c => ({ files: forgotten(c.files) }))
+    await fitSelection($)
     return r
   })
 
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear') await putContext($, c => ({ ...emptyContext(), filter: c.filter }))
+    if (e.reason === 'clear' || e.reason === 'resume') await putContext($, c => ({ ...emptyContext(), filter: c.filter }))
     return next(e)
   })
 
@@ -1017,8 +1035,8 @@ export const register: Register = (on, options) => {
     const t = await get($)
     const context = [...(e.context ?? [])]
     if (t.selected && (await exists($, t.selected))) context.push(`The user has this file selected in the file tree; "this" or "it" in the prompt likely refers to it: ${t.selected}`)
-    const mentions = [...e.text.matchAll(/@([^\s"'`]+)/g)]
-      .map(m => (m[1] ?? '').replace(/[.,;:!?)]+$/, ''))
+    const mentions = [...e.text.matchAll(/@(?:"((?:[^"\\]|\\.)+)"|([^\s"'`]+))/g)]
+      .map(m => (m[1] !== undefined ? m[1].replace(/\\(.)/g, '$1') : (m[2] ?? '').replace(/[.,;:!?)]+$/, '')))
       .filter(Boolean)
       .map(p => resolve(t.root, p, home))
       .filter(p => inside(t.root, p))
@@ -1062,7 +1080,8 @@ export const register: Register = (on, options) => {
     const ctx = await contextOf($)
     const rows = visibleRows(t, onlyShown(ctx))
     const weights = rollWeights(ctx.files, t.root)
-    const touch = ctx.files[t.cursor] ?? ctx.files[t.selected]
+    const target = rows.find(r => r.node.id === t.cursor)?.node.id ?? ''
+    const touch = ctx.files[target]
     const fixed = 2 + (t.top ? (t.branch ? 1 : 0) : 1) + (t.selected || latest ? 1 : 0) + (touch ? 1 : 0)
     const room = Math.max(5, (e.props.scroll?.bodyRows ?? 40) - fixed)
     const isLit = (id: string) => bright.has(id) || dimmed.has(id)
@@ -1139,7 +1158,7 @@ export const register: Register = (on, options) => {
 
     const note = (text: string): RowSpec => ({ id: '', left: [{ t: text, c: theme.muted }], right: [] })
     const specs: RowSpec[] = [
-      ...(rows.length === 0 ? [note(ctx.filter === 'context' ? 'nothing in context' : ctx.filter === 'touched' ? 'nothing touched this session' : 'empty')] : []),
+      ...(rows.length === 0 ? [note(emptyNote(t, ctx))] : []),
       ...pinned.map(rowSpec),
       ...(pinned.length > 0 ? [note('  ⋮')] : []),
       ...shown.map(rowSpec),
@@ -1210,12 +1229,12 @@ export const register: Register = (on, options) => {
           </Text>
           <Box flexGrow={1} />
           <Box flexDirection="row" gap={2}>
-            {weights[t.root] ? <Text color={CONTEXT_COLOR}>{`≈${weight(weights[t.root] ?? 0)}`}</Text> : null}
+            {weights[t.root] ? <Text color={CONTEXT_COLOR}>{`≈${weight(weights[t.root] ?? 0)}${follow ? '' : ` in ${t.root.split('/').pop() || t.root}`}`}</Text> : null}
             <Button
               key="filter"
               plain
               dimColor={ctx.filter === 'all'}
-              label={ctx.filter === 'context' ? '◆ ctx' : ctx.filter === 'touched' ? '◈ touched' : '◇'}
+              label={ctx.filter === 'context' ? '◆ ≈ in context' : ctx.filter === 'touched' ? '◈ touched' : '◇'}
               onPress={() => void cycleFilter($)}
             />
             <Button
@@ -1264,8 +1283,8 @@ export const register: Register = (on, options) => {
               onPress={() => void patch($, cur => ({ showHidden: !cur.showHidden }))}
             />
             <Button key="collapse" plain dimColor label={unicode ? '⊟' : '\u{eac5}'} onPress={() => void patch($, cur => ({ expanded: [], nodes: dropBelow(cur.nodes, cur.nodes.filter(x => x.parent === cur.root && x.kind === 'dir').map(x => x.id)) }))} />
-            {t.selected && <Button key="mention" plain label="@" onPress={() => void mention($, t.selected)} />}
-            {t.selected && <Button key="editor" plain label={unicode ? '✎' : '\u{f044}'} onPress={() => void openInEditor($, t.selected)} />}
+            {target && <Button key="mention" plain label="@" onPress={() => void mention($, target)} />}
+            {target && <Button key="editor" plain label={unicode ? '✎' : '\u{f044}'} onPress={() => void openInEditor($, target)} />}
             {t.selected && (
               <Button key="unselect" plain label={unicode ? '⊘' : '\u{f0777}'} onPress={() => void patch($, () => ({ selected: '' }))} />
             )}
@@ -1297,7 +1316,7 @@ export const register: Register = (on, options) => {
         <Box flexGrow={1} />
         {touch && (
           <Text color={touch.live ? CONTEXT_COLOR : theme.muted} wrap="truncate-end">
-            {detail(touch, now)}
+            {detail(target !== t.root && inside(t.root, target) ? target.slice(t.root.endsWith('/') ? t.root.length : t.root.length + 1) : shortPath(target), touch, now)}
           </Text>
         )}
         {(t.selected || latest) && (

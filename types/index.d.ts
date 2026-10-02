@@ -50,13 +50,13 @@ export type FileTree = {
   scroll: number | null
 }
 
+export type Act = 'read' | 'edited' | 'wrote' | 'changed' | 'committed'
+
 export type Touch = {
-  how: 'read' | 'edited' | 'wrote' | 'committed'
-  by: string
-  at: number
   line: number
   tokens: number
   live: boolean
+  by: Record<string, Partial<Record<Act, number>>>
 }
 
 export type ContextMap = {
