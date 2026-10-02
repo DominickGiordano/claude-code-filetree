@@ -43,8 +43,17 @@ Or inside a Claude Code session:
 - Git status per file and folder in color, with exact lines changed (`+N` `-N`) on modified files and `?:N M:N D:N` file counts on folders
 - Branch, upstream and ahead/behind in the header
 - Visual indicator of Claude reads and searches (purple), writes (orange) and commits (green); collapsed folders open to show the file
+
+  <img src="media/filetree-read.gif" alt="Files shimmer purple while Claude reads and searches them" width="800">
+
 - Git and GitHub operations via `git` and `gh` (commit, push, pull, checkout, merge, PR and more) shown as a status at the bottom of the pane
+
+  <img src="media/filetree-git.gif" alt="A committed file shimmers green and the footer shows the commit" width="800">
+
 - Selection-aware: the selected file is passed to Claude as context through a `prompt.submit` hook, and `@path` mentions in a prompt reveal that file in the tree
+
+  <img src="media/filetree-ask.gif" alt="Selecting config.yaml in the tree and asking Claude what it changed there" width="800">
+
 - Double-click a file to open it in its default app
 - Click to select, arrow keys to move through the tree
 - Light on large repos: no git calls outside a repo, and every git call is scoped to the cwd
