@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Claude_Code-%E2%89%A5_2.1.287-D97757?logo=claude&logoColor=fff" alt="Claude Code 2.1.287 or newer">
-  <img src="https://img.shields.io/badge/version-0.3.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.4.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/type-mod-6f42c1" alt="Claude Code mod">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
@@ -75,11 +75,14 @@ You can resize the pane with the mouse, or by setting custom `pane:grow` or `pan
 
 ## Additions in this fork
 
-- **In context:** files Claude has read or edited since the last compaction or `/clear` show an approximate token weight (`· 3.1k`) in purple, folders show the sum of their files, and the header shows the total. The estimate is the tool result Claude read plus what it wrote, at about 4 characters per token; images count by their display size. Compaction or `/clear` resets it.
-- **Who touched it:** the line under the tree names what happened to the file under the cursor, who did it and when, e.g. `edited by Explore · 2m ago`. Subagent reads and edits are attributed to the agent type and do not count toward the main context.
-- **Filters:** the `◇` button (or `f`) cycles through all files, files in context (`◆ ctx`) and files read, written or committed this session (`◈ touched`).
-- **@ mention:** the `@` button (or `@` / `m` on the cursor row) puts `@path` into the prompt box at the cursor as a draft, without sending it.
-- **Open in editor:** the `✎` button (or `e`) runs `code -g path:line`, at the line Claude last read or edited, and falls back to the default app when `code` is missing. Set **Editor** in `/config` to another command; `{path}` and `{line}` are filled in (`zed {path}:{line}`), otherwise the path is appended. Terminal editors such as `$EDITOR=vim` need a TTY the mod cannot give them, so they are not supported.
+- **≈ in context:** files the main conversation has read or edited since the last compaction, `/clear` or resume show an estimated token weight (`· 3.1k`) in purple. Folders show the sum of their files, and the header shows the total for the tree's root (`≈12k in <folder>` when the tree is pinned to a folder other than the cwd).
+  - It is an estimate: the tool result Claude read plus what it wrote, at about 4 characters per token; images count by their display size.
+  - It counts only the Read, Edit, Write and NotebookEdit tools. Files that reached Claude through Bash (`cat`, `rg`), Grep, Glob or an `@` mention in your prompt are not counted.
+  - After a compaction the weights reset to zero, but Claude Code may re-attach recently read files to the compacted conversation, so a file can be in context without showing a weight.
+- **Who touched it:** the line under the tree names the file under the cursor and everyone who touched it, newest first: `src/a.ts · ≈1k in context (main) · read by Explore 0s ago · edited by main 2m ago`. Subagents are named by their agent type and never count toward the main context. A shell write that can't be tied to one command (two commands ran at once and neither names the file) is credited to `shell`.
+- **Filters:** the `◇` button (or `f`) cycles through all files, files `◆ ≈ in context`, and files `◈ touched` (read, written or committed this session). A filter that hides the selected file clears the selection, so the file passed to Claude is always one you can see.
+- **@ mention:** the `@` button (or `@` / `m`) puts `@path` for the cursor row into the prompt box at the cursor as a draft, without sending it. Paths with spaces or quotes are written as `@"my notes.md"`.
+- **Open in editor:** the `✎` button (or `e`) opens the cursor row's file with `code -g path:line`, at the line Claude last read or edited, and falls back to the default app when `code` is missing. Set **Editor** in `/config` to another command; `{path}` and `{line}` are filled in (`zed {path}:{line}`), otherwise the path is appended. Terminal editors such as `$EDITOR=vim` need a TTY the mod cannot give them, so they are not supported.
 
 ## Settings
 
