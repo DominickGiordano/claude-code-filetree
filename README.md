@@ -18,7 +18,7 @@
 > [!NOTE]
 > filetree is a Claude Code **mod**: a plugin of function hooks with its own pane. Mods need **Claude Code 2.1.287 or newer**, and the pane docks beside the transcript in fullscreen mode.
 >
-> Tested by hand in the terminal on Linux. macOS and the Code tab of the Claude Desktop app are covered by Claude Code's plugin test kit; Windows should work but is untested. Mods do not load in WSL sessions of the Desktop app.
+> Tested by hand in the terminal on Linux. macOS, the Code tab of the Claude Desktop app and Windows are covered by `claude plugin test` (see `tests/`), not yet by hand. Mods do not load in WSL sessions of the Desktop app.
 
 ---
 
@@ -58,7 +58,7 @@ Or inside a Claude Code session:
 
 - Double-click a file to open it in its default app
 - Click to select, arrow keys to move through the tree
-- Light on large repos: no git calls outside a repo, and every git call is scoped to the cwd
+- Light on large repos: outside a repo it only checks once whether one exists, and every git call is scoped to the cwd
 - Nerd Font icons with a plain Unicode fallback
 
 ### Resizing the pane
