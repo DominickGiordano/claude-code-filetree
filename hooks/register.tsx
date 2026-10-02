@@ -350,11 +350,10 @@ async function flash($: EngineInterface, tones: Record<string, string>): Promise
   await patch($, cur => {
     if (cur.root !== root) return {}
     const open = new Set(cur.expanded)
-    const bright = new Set(unique)
+    const bright = new Set([...(cur.flashOn ? cur.flash.filter(id => !unique.includes(id)) : []), ...unique])
     const dim = new Set<string>()
     const all: Record<string, string> = cur.flashOn ? { ...cur.flashTones } : {}
     if (cur.flashOn) {
-      for (const id of cur.flash) bright.add(id)
       for (const id of cur.flashDim) dim.add(id)
     }
     for (const id of unique) {
