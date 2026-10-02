@@ -6,14 +6,18 @@ import type { RowSpec, RowsProps, Seg } from './rows'
 import { CHEVRON_CLOSED, CHEVRON_OPEN, fileIcon, GIT_COLOR } from './icons'
 import {
   ancestorsOf,
+  type Change,
   DEFAULT_THEME,
   dirname,
   emptyTree,
+  inside,
+  isAbsolute,
   join,
   mapper,
   parseGit,
   parseNumstat,
   parseTheme,
+  posix,
   rollCounts,
   replaceChildren,
   rollUp,
@@ -31,7 +35,6 @@ const SHIMMER = Object.fromEntries(Object.entries(TONES).map(([k, v]) => [k, { b
 const BRANCH_ROW = '#branch'
 const FLASH_MS = 2700
 const RUNNING_MAX_MS = 600_000
-const IGNORED_PRUNE_LIMIT = 40
 const NO_REPO_DEPTH = 4
 const DOUBLE_MS = 450
 const FIND_LIMIT = 200
@@ -42,7 +45,9 @@ const ADD_COLOR = '#98c379'
 const DEL_COLOR = '#e06c75'
 const THEME_FILE = '.local/state/omarchy/current/theme/colors.toml'
 const FONT_SCRIPT =
-  'f=$(fc-list ":charset=$1" file | head -n1 | cut -d: -f1); [ -n "$f" ] || { echo missing; exit 0; }; m=$(date -r "$f" +%s); p=$PPID; ' +
+  'if command -v fc-list >/dev/null 2>&1; then f=$(fc-list ":charset=$1" file | head -n1 | cut -d: -f1); ' +
+  'else f=$(ls "$HOME"/Library/Fonts/*Nerd* /Library/Fonts/*Nerd* 2>/dev/null | head -n1); fi; ' +
+  '[ -n "$f" ] || { echo missing; exit 0; }; m=$(date -r "$f" +%s 2>/dev/null || stat -f %m "$f"); p=$PPID; ' +
   'while [ -n "$p" ] && [ "$p" -gt 1 ]; do c=$(ps -o comm= -p "$p" 2>/dev/null | tr -d " "); case "$c" in ' +
   'ghostty|kitty|alacritty|Alacritty|foot|footclient|wezterm-gui|konsole|gnome-terminal-|xterm|urxvt|st|Terminal|iTerm2) ' +
   'e=$(ps -o etimes= -p "$p" 2>/dev/null | tr -d " "); [ -n "$e" ] && [ $(( $(date +%s) - e )) -lt "$m" ] && echo stale || echo ok; exit 0;; esac; ' +
@@ -65,6 +70,25 @@ let showWrites = true
 let searchIndex: { root: string; paths: Promise<string[]> } | null = null
 let activityId = 0
 let pointer = true
+let home = ''
+let platform: Promise<'linux' | 'darwin' | 'win32'> | null = null
+let dirty: { root: string; files: Record<string, Change> } = { root: '', files: {} }
+
+function osName($: EngineInterface): Promise<'linux' | 'darwin' | 'win32'> {
+  platform ??= (async () => {
+    if ((await $.env.get('OS')) === 'Windows_NT') return 'win32'
+    try {
+      return (await $.process.run(['uname', '-s'], { timeoutMs: 3_000 })).stdout.trim() === 'Darwin' ? 'darwin' : 'linux'
+    } catch {
+      return 'linux'
+    }
+  })()
+  return platform
+}
+
+async function cwdOf($: EngineInterface): Promise<string> {
+  return posix(await $.session.cwd())
+}
 
 function clean(segs: Seg[]): Seg[] {
   for (const seg of segs) for (const k of Object.keys(seg) as (keyof Seg)[]) if (seg[k] === undefined) delete seg[k]
@@ -165,7 +189,7 @@ async function readGit($: EngineInterface): Promise<void> {
   if (!t.root || !t.top) return
   const root = t.root
   try {
-    const status = await git($, root, ['status', '--porcelain=v1', '-b', '-z', '--ignored=traditional', '--untracked-files=normal', '--', '.'])
+    const status = await git($, root, ['status', '--porcelain=v1', '-b', '-z', '--ignored=matching', '--untracked-files=normal', '--', '.'])
     if (status.exitCode !== 0) return
     const parsed = parseGit(status.stdout, root, t.prefix)
     const diff: Record<string, [number, number]> = {}
@@ -177,6 +201,7 @@ async function readGit($: EngineInterface): Promise<void> {
       if (others.exitCode === 0) for (const rel of others.stdout.split('\0').filter(Boolean)) files[join(root, rel)] = 'new'
     }
     for (const path of Object.keys(diff)) if (files[path] === 'new') delete diff[path]
+    dirty = { root, files }
     await patch($, cur =>
       cur.root === root
         ? {
@@ -244,18 +269,44 @@ async function revealPaths($: EngineInterface, paths: string[]): Promise<void> {
   }
 }
 
-function pruneArgs(extra: string[] = []): string[] {
-  return ['(', ...PRUNE.flatMap((name, i) => (i === 0 ? ['-name', name] : ['-o', '-name', name])), ...extra.flatMap(p => ['-o', '-path', p]), ')', '-prune', '-o']
+function pruneArgs(): string[] {
+  return ['(', ...PRUNE.flatMap((name, i) => (i === 0 ? ['-name', name] : ['-o', '-name', name])), ')', '-prune', '-o']
 }
 
-async function changedSince($: EngineInterface, root: string, sinceMs: number, ignored: string[], depth: number): Promise<string[]> {
-  const dirs = ignored.filter(p => p.startsWith(root + '/')).slice(0, IGNORED_PRUNE_LIMIT)
+async function newer($: EngineInterface, paths: string[], sinceMs: number): Promise<string[]> {
+  const stats = await Promise.all(
+    paths.map(async p => {
+      try {
+        return (await $.fs.stat(p)).mtimeMs > sinceMs ? p : ''
+      } catch {
+        return ''
+      }
+    }),
+  )
+  return stats.filter(Boolean)
+}
+
+async function changedSince($: EngineInterface, root: string, sinceMs: number): Promise<string[]> {
+  if ((await osName($)) === 'win32') return []
+  const minutes = Math.ceil(((await $.clock.now()) - sinceMs) / 60_000) + 1
   try {
-    const run = await $.process.run(['find', '-H', root, '-xdev', ...(depth ? ['-maxdepth', String(depth)] : []), ...pruneArgs(dirs), '-newermt', `@${(sinceMs / 1000).toFixed(3)}`, '-print'], { timeoutMs: 8_000 })
-    return run.stdout.split('\n').filter(p => p && p !== root)
+    const run = await $.process.run(['find', '-H', root, '-xdev', '-maxdepth', String(NO_REPO_DEPTH), ...pruneArgs(), '-mmin', `-${minutes}`, '-print'], { timeoutMs: 8_000 })
+    return await newer($, run.stdout.split('\n').filter(p => p && p !== root).slice(0, FIND_LIMIT * 4), sinceMs)
   } catch {
     return []
   }
+}
+
+async function changedInRepo($: EngineInterface, root: string, sinceMs: number, before: Record<string, Change>): Promise<{ hits: string[]; gone: string[] }> {
+  if (dirty.root !== root) return { hits: [], gone: [] }
+  const entries = Object.entries(dirty.files).slice(0, 4_000)
+  const gone = entries.filter(([p, c]) => c === 'del' && before[p] !== 'del').map(([p]) => p)
+  return { hits: await newer($, entries.filter(([, c]) => c !== 'del').map(([p]) => p), sinceMs), gone }
+}
+
+function visibleDirs(t: FileTree): string[] {
+  const open = new Set(t.expanded)
+  return t.nodes.filter(n => n.kind === 'dir' && n.loaded && open.has(n.id) && ancestorsOf(n.id, t.root).every(a => open.has(a))).map(n => n.id)
 }
 
 async function flash($: EngineInterface, tones: Record<string, string>): Promise<void> {
@@ -308,7 +359,7 @@ async function flash($: EngineInterface, tones: Record<string, string>): Promise
 
 async function followCwd($: EngineInterface): Promise<boolean> {
   if (!follow) return false
-  const cwd = await $.session.cwd()
+  const cwd = await cwdOf($)
   const t = await get($)
   if (t.root === cwd) return false
   await reset($, cwd)
@@ -390,21 +441,27 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
   if (!t.root) return
   const actions = jobs.flatMap(j => j.p?.actions ?? [])
   const since = Math.min(...jobs.map(j => j.since))
+  const writes = !jobs.every(j => j.readOnly)
+  const before = dirty.root === t.root ? dirty.files : {}
   if (jobs.some(j => j.initRepo)) await detectRepo($)
   else if (!t.top && (await exists($, join(t.root, '.git')))) await detectRepo($)
-  if ((await get($)).top) await refreshGit($)
+  if ((await get($)).top && (writes || actions.length)) await refreshGit($)
   const fresh = await get($)
   const ignored = new Set(fresh.ignored)
   const tones: Record<string, string> = {}
-  if (!jobs.every(j => j.readOnly)) {
-    const hits = (await changedSince($, t.root, since, fresh.ignored, fresh.top ? 0 : NO_REPO_DEPTH)).filter(x => !underAny(x, ignored, t.root)).slice(0, FIND_LIMIT)
+  if (writes) {
+    const found = fresh.top ? await changedInRepo($, t.root, since, before) : { hits: await changedSince($, t.root, since), gone: [] }
+    const hits = found.hits.filter(x => inside(t.root, x) && !underAny(x, ignored, t.root)).slice(0, FIND_LIMIT)
     await revealPaths($, hits)
     const loaded = await get($)
-    const open = new Set(loaded.expanded)
-    const dirs = [...new Set([loaded.root, ...loaded.nodes.filter(n => n.kind === 'dir' && n.loaded && open.has(n.id)).map(n => n.id), ...hits.map(dirname)])].filter(
-      d => d === loaded.root || d.startsWith(loaded.root + '/'),
-    )
-    await loadDirs($, dirs)
+    const dirs = [...new Set([loaded.root, ...visibleDirs(loaded), ...hits.map(dirname), ...found.gone.map(dirname)])].filter(d => inside(loaded.root, d))
+    const listed = await loadDirs($, dirs)
+    if (!fresh.top && (await osName($)) === 'win32')
+      for (const kids of listed.values()) for (const n of kids) if (n.mtime > since && hits.length < FIND_LIMIT) hits.push(n.id)
+    await patch($, cur => {
+      const ids = new Set(cur.nodes.map(n => n.id))
+      return { expanded: cur.expanded.filter(id => ids.has(id)) }
+    })
     const present = new Set((await get($)).nodes.map(n => n.id))
     const touchTone = actions.find(a => !['commit', 'push', 'add'].includes(a.verb))?.tone ?? 'orange'
     if (showWrites) for (const id of hits) if (present.has(id)) tones[id] = touchTone
@@ -413,7 +470,7 @@ async function afterBash($: EngineInterface, jobs: Job[]): Promise<void> {
     const found: string[] = []
     for (const r of reads) {
       if (found.length >= READ_REVEAL_LIMIT) break
-      if (r !== t.root && r.startsWith(t.root + '/') && !underAny(r, ignored, t.root) && (await exists($, r))) found.push(r)
+      if (r !== t.root && inside(t.root, r) && !underAny(r, ignored, t.root) && (await exists($, r))) found.push(r)
     }
     if (found.length) {
       await revealPaths($, found)
@@ -454,16 +511,16 @@ function scheduleScan($: EngineInterface, job: Job): void {
 async function touched($: EngineInterface, paths: string[], tone: string, show: boolean): Promise<void> {
   if (await followCwd($)) return
   const t = await get($)
-  const inside = paths.filter(p => p === t.root || p.startsWith(t.root + '/'))
-  if (inside.length === 0) return
+  const within = paths.map(posix).filter(p => inside(t.root, p))
+  if (within.length === 0) return
   if (tone !== 'purple') {
-    await revealPaths($, inside.map(dirname))
-    await loadDirs($, [...new Set(inside.map(dirname))].filter(d => d === t.root || d.startsWith(t.root + '/')))
+    await revealPaths($, within.map(dirname))
+    await loadDirs($, [...new Set(within.map(dirname))].filter(d => inside(t.root, d)))
     await refreshGit($)
-  } else await revealPaths($, inside)
+  } else await revealPaths($, within)
   if (!show) return
   const tones: Record<string, string> = {}
-  for (const p of inside) tones[p] = tone
+  for (const p of within) tones[p] = tone
   await flash($, tones)
 }
 
@@ -477,12 +534,31 @@ async function reveal($: EngineInterface, paths: string[]): Promise<void> {
   })
 }
 
+async function walk($: EngineInterface, root: string, depth: number, limit: number): Promise<string[]> {
+  const out: string[] = []
+  let level = [root]
+  for (let d = 0; d < depth && level.length && out.length < limit; d++) {
+    const next: string[] = []
+    for (const dir of level) {
+      for (const n of await list($, dir)) {
+        if (n.kind === 'dir') {
+          if (!PRUNE.includes(n.name)) next.push(n.id)
+        } else out.push(n.id)
+      }
+      if (out.length >= limit) break
+    }
+    level = next
+  }
+  return out
+}
+
 async function listAll($: EngineInterface, t: FileTree): Promise<string[]> {
   try {
+    if (!t.top && (await osName($)) === 'win32') return await walk($, t.root, 6, 20_000)
     const run = t.top
       ? await git($, t.root, ['ls-files', '-co', '--exclude-standard', '-z'], 10_000)
       : await $.process.run(['find', '-H', t.root, '-xdev', '-maxdepth', '6', ...pruneArgs(), '-type', 'f', '-print0'], { timeoutMs: 10_000 })
-    return run.stdout.split('\0').filter(Boolean).map(p => (p.startsWith('/') ? p : join(t.root, p)))
+    return run.stdout.split('\0').filter(Boolean).map(p => (isAbsolute(p) ? p : join(t.root, p)))
   } catch {
     return []
   }
@@ -524,11 +600,18 @@ async function finePointerOk($: EngineInterface): Promise<boolean> {
   }
 }
 
-async function launch($: EngineInterface, argv: string[]): Promise<void> {
+async function openFile($: EngineInterface, path: string): Promise<void> {
+  const os = await osName($)
+  const argv =
+    os === 'darwin'
+      ? ['open', path]
+      : os === 'win32'
+        ? ['cmd', '/c', 'start', '', path.replace(/\//g, '\\')]
+        : ['setsid', '-f', 'sh', '-c', 'if command -v xdg-open >/dev/null; then exec xdg-open "$1"; else exec gio open "$1"; fi </dev/null >/dev/null 2>&1', 'sh', path]
   try {
-    await $.process.run(['setsid', '-f', ...argv], { timeoutMs: 10_000 })
+    await $.process.run(argv, { timeoutMs: 10_000 })
   } catch {
-    $.ui.toast(`could not start ${argv[0] ?? ''}`)
+    $.ui.toast(`could not open ${path} with ${argv[0] ?? ''}`)
   }
 }
 
@@ -556,11 +639,11 @@ async function openNode($: EngineInterface, n: FileNode): Promise<void> {
   if (n.kind === 'dir') {
     follow = false
     await reset($, n.id)
-  } else await launch($, ['gio', 'open', n.id])
+  } else await openFile($, n.id)
 }
 
 function shortPath(path: string): string {
-  return path.replace(/^\/home\/[^/]+/, '~')
+  return home && inside(home, path) ? `~${path.slice(home.length)}` : path
 }
 
 export const register: Register = (on, options) => {
@@ -570,6 +653,7 @@ export const register: Register = (on, options) => {
   showWrites = activity.includes('writes')
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'filetree', description: 'Show the file tree; args: [path] (no path = cwd)' })
+    home = posix(((await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || '').replace(/[\\/]+$/, ''))
     void (async () => {
       pointer = await finePointerOk($)
       try {
@@ -586,7 +670,7 @@ export const register: Register = (on, options) => {
       const t = await get($)
       if (t.flashOn) await patch($, () => ({ flash: [], flashDim: [], flashOn: false, flashTones: {} }))
       await setActivities($, cur => cur.map(a => (a.state === 'running' ? { ...a, state: 'failed', label: `${a.kind} interrupted` } : a)))
-      const cwd = await $.session.cwd()
+      const cwd = await cwdOf($)
       if (!t.root || t.nodes.length === 0 || (follow && t.root !== cwd)) await reset($, cwd)
       else await $.ui.open({ id: PANE, title: `Files: ${t.root.split('/').pop() || t.root}` })
     })()
@@ -595,9 +679,9 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'filetree' }, async ($, e) => {
     const arg = (e.args ?? '').trim()
-    const cwd = await $.session.cwd()
+    const cwd = await cwdOf($)
     follow = !arg
-    const root = arg ? resolve(cwd, arg) : cwd
+    const root = arg ? resolve(cwd, arg, home) : cwd
     await reset($, root, true)
     return { text: `File tree on ${shortPath(root)}${follow ? ' (follows the cwd)' : ''}.` }
   })
@@ -606,7 +690,7 @@ export const register: Register = (on, options) => {
     if (e.tool !== 'Edit' && e.tool !== 'Write' && e.tool !== 'NotebookEdit' && e.tool !== 'Bash') return next(e)
     const command = e.tool === 'Bash' ? e.command : ''
     const since = await $.clock.now()
-    const cwd = e.tool === 'Bash' ? await $.session.cwd() : ''
+    const cwd = e.tool === 'Bash' ? await cwdOf($) : ''
     const actions = gitActions(command)
     const pending: Pending | null = actions.length ? { actions, ids: await startGit($, actions) } : null
     let result: Awaited<ReturnType<typeof next>>
@@ -624,7 +708,7 @@ export const register: Register = (on, options) => {
     if (failed) return result
     if (e.tool === 'Bash') {
       const stdout = result.result && typeof result.result === 'object' && 'stdout' in result.result ? String(result.result.stdout) : ''
-      if (showReads) queuedReads.push(...readTargets(command, cwd, stdout))
+      if (showReads) queuedReads.push(...readTargets(command, cwd, stdout, home))
       scheduleScan($, { p: pending, since, initRepo: actions.some(a => a.init), readOnly: !pending && readOnly(command) })
     } else {
       const file =
@@ -641,7 +725,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'Read' }, async ($, e, next) => {
     const result = await next(e)
     if (result.deny || result.isError || e.tool !== 'Read' || !showReads) return result
-    void touched($, [e.file_path], 'purple', true)
+    void touched($, [posix(e.file_path)], 'purple', true)
     return result
   })
 
@@ -685,8 +769,8 @@ export const register: Register = (on, options) => {
     const mentions = [...e.text.matchAll(/@([^\s"'`]+)/g)]
       .map(m => (m[1] ?? '').replace(/[.,;:!?)]+$/, ''))
       .filter(Boolean)
-      .map(p => (p.startsWith('/') ? p : join(t.root, p.replace(/^\.\//, ''))))
-      .filter(p => p === t.root || p.startsWith(t.root + '/'))
+      .map(p => resolve(t.root, p, home))
+      .filter(p => inside(t.root, p))
     if (mentions.length) {
       void (async () => {
         const found: string[] = []
@@ -874,7 +958,7 @@ export const register: Register = (on, options) => {
               onPress={() =>
                 void (async () => {
                   follow = true
-                  await reset($, await $.session.cwd())
+                  await reset($, await cwdOf($))
                 })()
               }
             />
@@ -928,7 +1012,7 @@ export const register: Register = (on, options) => {
             {t.selected ? (
               <Box flexShrink={1}>
                 <Text dimColor wrap="truncate-start">
-                  selected: {t.selected.startsWith(t.root + '/') ? t.selected.slice(t.root.length + 1) : shortPath(t.selected)}
+                  selected: {t.selected !== t.root && inside(t.root, t.selected) ? t.selected.slice(t.root.endsWith('/') ? t.root.length : t.root.length + 1) : shortPath(t.selected)}
                 </Text>
               </Box>
             ) : null}

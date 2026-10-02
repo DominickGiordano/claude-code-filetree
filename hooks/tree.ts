@@ -54,8 +54,21 @@ export function join(dir: string, name: string): string {
 }
 
 export function dirname(path: string): string {
+  if (/^[A-Za-z]:\/[^/]*$/.test(path)) return path.slice(0, 3)
   const i = path.lastIndexOf('/')
   return i <= 0 ? '/' : path.slice(0, i)
+}
+
+export function posix(path: string): string {
+  return path.replace(/\\/g, '/')
+}
+
+export function isAbsolute(path: string): boolean {
+  return path.startsWith('/') || /^[A-Za-z]:\//.test(path)
+}
+
+export function inside(root: string, path: string): boolean {
+  return path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`)
 }
 
 export function toNodes(dir: string, list: Entry[]): FileNode[] {

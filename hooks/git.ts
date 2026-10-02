@@ -1,3 +1,5 @@
+import { isAbsolute, posix } from './tree'
+
 export type GitAction = {
   kind: string
   verb: string
@@ -116,38 +118,50 @@ const READERS = new Set(['rg', 'grep', 'egrep', 'fgrep', 'find', 'fd', 'fdfind',
 const PATTERN_FIRST = new Set(['rg', 'grep', 'egrep', 'fgrep', 'sed', 'awk', 'jq'])
 const OUTPUT_PATHS = new Set(['rg', 'grep', 'egrep', 'fgrep', 'find', 'fd', 'fdfind'])
 
-export function resolve(cwd: string, p: string): string {
-  if (p.startsWith('/')) return p.replace(/\/+$/, '') || '/'
-  const parts = cwd.split('/')
-  for (const seg of p.split('/')) {
-    if (!seg || seg === '.') continue
-    if (seg === '..') parts.pop()
-    else parts.push(seg)
-  }
-  return parts.join('/') || '/'
+function tidy(path: string): string {
+  const s = path.replace(/\/+$/, '')
+  return s === '' ? '/' : /^[A-Za-z]:$/.test(s) ? `${s}/` : s
 }
 
+export function resolve(cwd: string, p: string, home = ''): string {
+  let path = posix(p)
+  if (home && (path === '~' || path.startsWith('~/'))) path = home + path.slice(1)
+  if (isAbsolute(path)) return tidy(path)
+  const parts = posix(cwd).replace(/\/+$/, '').split('/')
+  for (const seg of path.split('/')) {
+    if (!seg || seg === '.') continue
+    if (seg === '..') {
+      if (parts.length > 1) parts.pop()
+    } else parts.push(seg)
+  }
+  return tidy(parts.join('/'))
+}
+
+const WRITE_FLAGS = /^-(delete|exec|execdir|ok|okdir|fprint\w*|fls|x|X|-exec|-exec-batch)$/
+
 export function readOnly(command: string): boolean {
-  if (/[^>]>[^>&]|>>/.test(` ${command}`)) return false
+  const bare = ` ${command}`.replace(/\d*>&\d/g, ' ').replace(/(\d*|&)>>?\s*\/dev\/null/g, ' ')
+  if (/[^>]>[^>&]|>>/.test(bare)) return false
   return segments(command).every(raw => {
     const tokens = stripGlobals(raw)
     const head = tokens[0]?.split('/').pop() ?? ''
     if (head === 'cd' || head === 'echo' || head === 'printf' || head === 'true' || head === 'pwd') return true
     if (head === 'git') return gitActions(tokens.join(' ')).length === 0
     if (head === 'sed') return !tokens.some(t => /^-i/.test(t))
+    if (head === 'find' || head === 'fd' || head === 'fdfind') return !tokens.some(t => WRITE_FLAGS.test(t))
     return READERS.has(head)
   })
 }
 
-export function readTargets(command: string, sessionCwd: string, stdout: string): string[] {
+export function readTargets(command: string, sessionCwd: string, stdout: string, home = ''): string[] {
   let cwd = sessionCwd
   const out = new Set<string>()
   let listsPaths = false
   for (const raw of segments(command)) {
-    const tokens = stripGlobals(raw).map(t => t.replace(/^["']|["']$/g, ''))
+    const tokens = stripGlobals(raw).map(t => posix(t.replace(/^["']|["']$/g, '')))
     const head = tokens[0]?.split('/').pop() ?? ''
     if (head === 'cd' && tokens[1]) {
-      cwd = resolve(cwd, tokens[1])
+      cwd = resolve(cwd, tokens[1], home)
       continue
     }
     if (!READERS.has(head)) continue
@@ -166,13 +180,13 @@ export function readTargets(command: string, sessionCwd: string, stdout: string)
         continue
       }
       if (/[*?<>|]/.test(a)) continue
-      out.add(resolve(cwd, a))
+      out.add(resolve(cwd, a, home))
     }
   }
   if (listsPaths) {
     for (const line of stdout.split('\n').slice(0, 400)) {
-      const path = line.match(/^([^:\0]+?)(?::\d+[:-]|$|:)/)?.[1]?.trim()
-      if (path && !path.includes(' ') ) out.add(resolve(cwd, path))
+      const path = posix(line).match(/^((?:[A-Za-z]:)?[^:\0]+?)(?::\d+[:-]|$|:)/)?.[1]?.trim()
+      if (path && !path.includes(' ')) out.add(resolve(cwd, path, home))
     }
   }
   return [...out].slice(0, 60)
