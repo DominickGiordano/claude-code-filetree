@@ -71,10 +71,48 @@ const GH_VERBS: Record<string, Omit<GitAction, 'kind'>> = {
 const READ_ONLY_GIT = new Set(['status', 'log', 'diff', 'show', 'blame', 'rev-parse', 'ls-files', 'grep', 'describe', 'config', 'remote', 'reflog', 'shortlog', 'help', 'version', 'check-ignore'])
 
 function segments(command: string): string[][] {
-  return command
-    .split(/&&|\|\||;|\||\n/)
-    .map(s => s.trim().split(/\s+/).filter(Boolean))
-    .filter(s => s.length > 0)
+  const out: string[][] = []
+  let cur: string[] = []
+  let tok = ''
+  let quote = ''
+  let has = false
+  const endTok = () => {
+    if (has) cur.push(tok)
+    tok = ''
+    has = false
+  }
+  const endSeg = () => {
+    endTok()
+    if (cur.length) out.push(cur)
+    cur = []
+  }
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i] ?? ''
+    if (quote) {
+      if (ch === quote) quote = ''
+      else if (ch === '\\' && quote === '"' && i + 1 < command.length) tok += command[++i]
+      else tok += ch
+    } else if (ch === '"' || ch === "'") {
+      quote = ch
+      has = true
+    } else if (ch === '\\' && i + 1 < command.length) {
+      tok += command[++i]
+      has = true
+    } else if (ch === ' ' || ch === '\t') endTok()
+    else if (ch === '\n' || ch === ';') endSeg()
+    else if (ch === '&' && (command[i - 1] === '>' || command[i + 1] === '>')) {
+      tok += ch
+      has = true
+    } else if (ch === '&' || ch === '|') {
+      if (command[i + 1] === ch) i++
+      endSeg()
+    } else {
+      tok += ch
+      has = true
+    }
+  }
+  endSeg()
+  return out
 }
 
 function stripGlobals(tokens: string[]): string[] {
@@ -120,7 +158,7 @@ const OUTPUT_PATHS = new Set(['rg', 'grep', 'egrep', 'fgrep', 'find', 'fd', 'fdf
 
 function tidy(path: string): string {
   const s = path.replace(/\/+$/, '')
-  return s === '' ? '/' : /^[A-Za-z]:$/.test(s) ? `${s}/` : s
+  return s === '' ? '/' : /^[A-Za-z]:$/.test(s) && isAbsolute(`${s}/`) ? `${s}/` : s
 }
 
 export function resolve(cwd: string, p: string, home = ''): string {

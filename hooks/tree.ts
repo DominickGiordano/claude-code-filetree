@@ -7,11 +7,11 @@ export type Row = { node: FileNode; depth: number; open: boolean }
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
 
 export const DEFAULT_THEME: Theme = {
-  fg: '#cacccc',
-  accent: '#cacccc',
-  muted: '#707880',
-  urgent: '#a55555',
-  selection: '#2a2e3a',
+  fg: '',
+  accent: '#5b9bd5',
+  muted: '#808a96',
+  urgent: '#d0605e',
+  selection: '#6b7280',
 }
 
 export function emptyTree(root: string): FileTree {
@@ -53,18 +53,32 @@ export function join(dir: string, name: string): string {
   return dir.endsWith('/') ? dir + name : `${dir}/${name}`
 }
 
+let drives = false
+
 export function dirname(path: string): string {
-  if (/^[A-Za-z]:\/[^/]*$/.test(path)) return path.slice(0, 3)
+  if (drives && /^[A-Za-z]:\/[^/]*$/.test(path)) return path.slice(0, 3)
   const i = path.lastIndexOf('/')
   return i <= 0 ? '/' : path.slice(0, i)
 }
 
+export function useDrives(on: boolean): void {
+  drives = on
+}
+
 export function posix(path: string): string {
-  return path.replace(/\\/g, '/')
+  if (!drives) return path
+  return path.replace(/\\/g, '/').replace(/^\/([A-Za-z])(\/|$)/, (_, d: string) => `${d.toUpperCase()}:/`)
+}
+
+export function dropBelow(nodes: FileNode[], dirs: string[]): FileNode[] {
+  if (dirs.length === 0) return nodes
+  const under = (id: string) => dirs.some(d => id !== d && inside(d, id))
+  const gone = new Set(dirs)
+  return nodes.filter(n => !under(n.id)).map(n => (gone.has(n.id) && n.loaded ? { ...n, loaded: false } : n))
 }
 
 export function isAbsolute(path: string): boolean {
-  return path.startsWith('/') || /^[A-Za-z]:\//.test(path)
+  return path.startsWith('/') || (drives && /^[A-Za-z]:\//.test(path))
 }
 
 export function inside(root: string, path: string): boolean {
