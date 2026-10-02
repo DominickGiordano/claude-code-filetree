@@ -37,22 +37,9 @@ Or inside a Claude Code session:
 /plugin install filetree@filetree
 ```
 
-The repo is private for now, so installing needs GitHub access through `gh` or your git credentials. Background auto-updates of a private marketplace need `GITHUB_TOKEN` in the environment.
+## Features
 
-To develop, load a checkout directly: `claude --plugin-dir ~/git/filetree`
-
-## What it shows
-
-- **The cwd Claude is in.** It follows Claude's working folder; `/filetree <path>` pins another folder and `/filetree` with no path goes back to the cwd.
-- **Git status in FileBlade colors.** Each file shows its badge (`A ? R C M T D U`, ignored dimmed). Modified files show exact lines changed from `git diff HEAD` as green `+N` and red `-N`; folders and the header show the summed lines plus file counts `?:N M:N D:N`, like the Claude Code status line. The header also shows the branch with ahead/behind.
-- **What Claude is doing.**
-  - purple: files Claude reads or searches (the Read tool, and Bash `rg`, `grep`, `find`, `cat` and similar)
-  - orange: files Claude writes, whether through Edit/Write or a Bash command; collapsed folders open for it and shimmer dimmed
-  - green: files Claude commits
-- **Git actions.** `git` and `gh` commands show as one status at the bottom right of the pane, with their own icon and color: commit green, push teal, pull/fetch/checkout blue, merge/rebase/PR purple, reset/restore red.
-- **Interactive.** Search finds files anywhere under the cwd. Click a name to select it or open a folder, double-click to open a file, and arrow keys move through the tree. The selected file goes with each prompt as context, and `@path` mentions in a prompt reveal that file.
-
-It stays light: no git calls outside a repo until `git init` or `clone`, and inside one every git call is scoped to the cwd and uses `--no-optional-locks`.
+- Interactive file tree for the working directory where you're using Claude Code
 
 ## Settings
 
