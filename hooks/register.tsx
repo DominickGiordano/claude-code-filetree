@@ -52,6 +52,8 @@ let scanAgain = false
 let gitRun: Promise<void> | null = null
 let gitAgain = false
 let queuedReads: string[] = []
+let showReads = true
+let showWrites = true
 let searchIndex: { root: string; paths: string[] } | null = null
 let activityId = 0
 
@@ -475,6 +477,7 @@ async function afterBash($: EngineInterface, p: Pending | null, marker: string, 
     if (pushLike) tones[BRANCH_ROW] = pushLike.tone
     if (p.actions.some(a => a.verb === 'commit')) tones[BRANCH_ROW] = tones[BRANCH_ROW] ?? 'green'
   }
+  if (!showWrites) for (const id of Object.keys(tones)) if (tones[id] !== 'purple') delete tones[id]
   await flash($, tones)
 }
 
@@ -586,7 +589,10 @@ function shortPath(path: string): string {
   return path.replace(/^\/home\/[^/]+/, '~')
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const activity = typeof options?.activity === 'string' ? options.activity : 'reads and writes'
+  showReads = activity.includes('reads')
+  showWrites = activity.includes('writes')
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'filetree', description: 'Show the file tree; args: [path] (no path follows the cwd)' })
     void (async () => {
@@ -646,7 +652,7 @@ export const register: Register = on => {
     if (failed) return result
     if (e.tool === 'Bash') {
       const stdout = result.result && typeof result.result === 'object' && 'stdout' in result.result ? String(result.result.stdout) : ''
-      queuedReads.push(...readTargets(command, await $.session.cwd(), stdout))
+      if (showReads) queuedReads.push(...readTargets(command, await $.session.cwd(), stdout))
       const initRepo = Boolean(pending?.actions.some(a => a.init)) || /\bgit\s+(init|clone)\b/.test(command)
       scheduleScan($, pending, marker, initRepo)
     } else {
@@ -656,7 +662,8 @@ export const register: Register = on => {
           : 'notebook_path' in e && typeof e.notebook_path === 'string'
             ? e.notebook_path
             : ''
-      if (file) void touched($, [file])
+      if (file && showWrites) void touched($, [file])
+      else if (file) void refreshGit($)
     }
     return result
   })
@@ -664,7 +671,7 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Read' }, async ($, e, next) => {
     const result = await next(e)
     if (result.deny || result.isError || e.tool !== 'Read') return result
-    void touched($, [e.file_path], 'purple')
+    if (showReads) void touched($, [e.file_path], 'purple')
     return result
   })
 

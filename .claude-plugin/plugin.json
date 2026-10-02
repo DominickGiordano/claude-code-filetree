@@ -12,5 +12,19 @@
     "git",
     "mod",
     "pane"
-  ]
+  ],
+  "userConfig": {
+    "activity": {
+      "type": "string",
+      "title": "Claude activity",
+      "description": "Which of Claude's file activity shimmers in the tree: reads and searches in purple, writes and git actions in orange and green",
+      "default": "reads and writes",
+      "options": [
+        "reads and writes",
+        "writes",
+        "reads",
+        "none"
+      ]
+    }
+  }
 }

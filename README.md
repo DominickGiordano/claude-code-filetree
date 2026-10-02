@@ -10,6 +10,10 @@ Claude Code plugin (2.1.287+): a FileBlade-style file tree of the session cwd, d
 - the search box finds files anywhere under the cwd (git ls-files, or find outside a repo) and opens their folders; click a name to select or toggle, double-click to open (`gio open`) or to root the tree at a folder; the selected file goes with each prompt as context; `@path` mentions in a prompt reveal that file and move the row highlight onto it
 - header icons: up, follow cwd, refresh, dotfiles, collapse, unselect; FileBlade Nerd Font icons fall back to plain Unicode when no Nerd Font is installed
 
+## Settings
+
+`Claude activity` (in `/config`, or `pluginConfigs.filetree.options.activity` in settings) picks what shimmers: `reads and writes` (default), `writes` (orange edits and green git actions), `reads` (purple reads and searches) or `none`. Git status, line counts and the footer git status are always shown.
+
 ## Install
 
 The repo is its own plugin marketplace (`.claude-plugin/marketplace.json`, plugin at the root). It is private for now, so installing needs GitHub access through `gh` or git credentials:
