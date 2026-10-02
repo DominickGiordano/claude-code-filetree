@@ -482,6 +482,16 @@ async function touched($: EngineInterface, paths: string[], tone = 'orange'): Pr
   await flash($, tones)
 }
 
+async function reveal($: EngineInterface, paths: string[]): Promise<void> {
+  if (await followCwd($)) return
+  await revealPaths($, paths)
+  await patch($, cur => {
+    const open = new Set(cur.expanded)
+    for (const p of paths) for (const a of ancestorsOf(p, cur.root)) open.add(a)
+    return { expanded: [...open], cursor: paths[paths.length - 1] ?? cur.cursor }
+  })
+}
+
 async function launch($: EngineInterface, argv: string[]): Promise<void> {
   try {
     await $.process.run(['setsid', '-f', ...argv], { timeoutMs: 10_000 })
@@ -649,7 +659,7 @@ export const register: Register = on => {
             continue
           }
         }
-        if (found.length) await touched($, found, 'cyan')
+        if (found.length) await reveal($, found)
       })()
     }
     return next(context.length ? { ...e, context } : e)

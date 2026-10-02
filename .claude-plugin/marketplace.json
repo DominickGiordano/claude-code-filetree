@@ -1,0 +1,16 @@
+{
+  "name": "filetree",
+  "owner": {
+    "name": "Kurt Buhler"
+  },
+  "metadata": {
+    "description": "FileBlade-style file tree pane for Claude Code with git status, lines changed and a live view of Claude's file and git activity"
+  },
+  "plugins": [
+    {
+      "name": "filetree",
+      "description": "File tree of the session cwd with git status, lines changed, shimmer on files Claude touches and its git activity",
+      "source": "./"
+    }
+  ]
+}
